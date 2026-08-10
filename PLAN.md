@@ -20,15 +20,16 @@
 
 ## 3. 阶段一：训练
 
-### 3.1 环境接口（`game/`，已就绪）
+### 3.1 环境接口（`game.py`，已就绪）
 
-- `Game.reset() / Game.move(src, dst)`；动作空间 6×5=30（含自杀）；非法动作仅"源列空/同列"
-- 状态编码（RL 用，独立于控制台）：
-  - 6×7 网格，格值 0~8，one-hot 9 通道（CNN）或标量归一化（MLP）
-  - 元特征：周期内步数(0~3)、当前六列掉落预告、已合成最大值、得分
-- 每 4 步掉落自带随机性 → 环境为随机 MDP，AI 可利用预告做前瞻
+- `Game.reset() / Game.move(src, dst) / Game.legal_moves() / Game.observe()`
+- **栈表示：stacks[列][0] = 栈顶**，控制台列号显示 1~6（输入时内部转 0 基）
+- 动作空间 6×5=30（含自杀）；非法动作仅"源列空/同列"
+- 环境带事件钩子 `Game.events`：每次动作产生的合并值（含掉落合并），供奖励计算
+- 掉落分布由 `drop_sampler(rng, max_merged)` 注入（`agents/dist.py`，支持 cap 与任意权重）
+- 状态编码（`agents/dqn.py`）：6×7 网格 one-hot（9 类）+ 元特征（周期步数、六列预告、已合成最大值）
 
-### 3.2 奖励（已确认方案 B）
+### 3.2 奖励（已确认方案 B，按事件实现）
 
 - 合成 9：+10
 - 中间合成：+0.5 × 新值
@@ -37,18 +38,18 @@
 
 ### 3.3 算法
 
-- **首选 DQN**：Double DQN + 目标网络 + 经验回放（+ 优先回放，如训练不稳定再加）
-  - 网络：输入 6×7 网格 + 元特征，小型 MLP（或 CNN），输出 30 维 Q
-  - ε-greedy：1.0 线性衰减至 0.05
-  - 全动作可执行（自杀合法），无需 mask，但可对"源空"动作给 −∞ 或高惩罚加速收敛
-- **基线对照**：随机合法动作、规则贪心（同值叠列/高列优先消矮）
+- **首选 DQN**（`agents/dqn.py`）：Double DQN + 目标网络 + 经验回放（+ 优先回放，如训练不稳定再加）
+  - 网络：MLP(389 → 256 → 256 → 30)，输入 one-hot 网格 + 元特征，输出 30 维 Q
+  - ε-greedy：1.0 → 0.05（默认 20 万步线性衰减）
+  - 全动作可执行（自杀合法），用 legal_mask 屏蔽"源空/同列"动作
+- **基线对照**（`agents/baselines.py`）：随机合法动作、贪心（模拟每个合法动作取即时收益+栈高惩罚）
 - **升级路线**：DQN 平台期后 → MCTS（+价值网络，AlphaZero 式单人）/ beam search
 
 ### 3.4 训练工程
 
-- `train.py`：多环境并行采样，N 步冻结评估，checkpoint 保存
-- 评估协议：固定随机种子 1000 局，统计平均得分 / 存活步数 / 合成 9 数
-- 指标曲线：`runs/<run_id>/` 记录 score、survival、loss
+- `train.py`：多环境并行（--n-envs 8），每步训练，`runs/<run_id>/` 存 best.pt / final.pt / metrics.jsonl
+- `eval.py`：固定种子 N 局，对比 agent / greedy / random，输出平均得分、存活步数、合成 9 数
+- 死亡局编码保护：栈可临时高 8，编码槽位按 7 截断
 
 ### 3.5 多分布 model selection
 
@@ -114,20 +115,20 @@
 
 ```
 .
-├── game/            # 环境核心（MVP 已完成）
-│   ├── env.py       # 规则引擎
-│   ├── drop.py      # 掉落分布
-│   └── console.py   # 控制台 UI
-├── agents/          # DQN 等算法
-├── train.py         # 训练入口
-├── eval.py          # 离线评测
+├── game.py           # 环境核心（唯一游戏实现，含测试 test_game.py）
+├── agents/           # 算法与基线
+│   ├── dqn.py        # DQN + 状态编码 + mask
+│   ├── baselines.py  # random / greedy
+│   └── dist.py       # 掉落分布采样器
+├── train.py          # 训练入口
+├── eval.py           # 离线评测
 ├── configs/
 │   └── drop_dists.json
-├── bridge/          # 桥接层
-│   ├── calibrate.py # 锚点校准工具
-│   ├── capture.py   # 截图/锚定
-│   ├── recognize.py # 数字识别
-│   └── act.py       # 点击执行
-├── runs/            # 训练产物（gitignore）
+├── bridge/           # 桥接层（阶段二）
+│   ├── calibrate.py  # 锚点校准工具
+│   ├── capture.py    # 截图/锚定
+│   ├── recognize.py  # 数字识别
+│   └── act.py        # 点击执行
+├── runs/             # 训练产物（gitignore）
 └── PLAN.md
 ```

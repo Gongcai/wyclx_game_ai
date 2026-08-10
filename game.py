@@ -20,6 +20,7 @@ class Game:
         self.dead = False
         self.preview = None
         self.last_drop = None
+        self.events = []
         return self.observe()
 
     def observe(self):
@@ -38,6 +39,7 @@ class Game:
     def move(self, src, dst):
         if self.dead or src == dst or not self.stacks[src]:
             return False
+        self.events.clear()
         v = self.stacks[src].pop(0)
         self.stacks[dst].insert(0, v)
         self._merge_col(dst)
@@ -79,6 +81,7 @@ class Game:
                 break
             del st[:k]
             nv = top + 1
+            self.events.append(nv)
             if nv > MAX_VALUE:
                 self.score += 9
                 self.max_merged = max(self.max_merged, 9)
