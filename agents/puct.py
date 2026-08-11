@@ -24,24 +24,27 @@ class _Node:
 
 
 @torch.no_grad()
-def _evaluate(net, game, device, cache):
+def _evaluate(net, game, device, cache, death_penalty):
     state = encode(game)
     key = state.numpy().tobytes()
     cached = cache.get(key)
     if cached is not None:
         return cached
-    policy, future_n9, _distance = net(state.to(device).unsqueeze(0))
+    policy, future_n9, _distance, death_risk = net(state.to(device).unsqueeze(0))
     mask = legal_mask(game, device).bool()
     policy = policy[0].masked_fill(~mask, float("-inf"))
     priors = torch.softmax(policy, dim=0).cpu()
-    result = (priors, max(0.0, float(future_n9[0])))
+    result = (
+        priors,
+        max(0.0, float(future_n9[0])) - death_penalty * float(death_risk[0]),
+    )
     cache[key] = result
     return result
 
 
 def puct_search(
     game, net, device="cpu", simulations=64, depth=24,
-    c_puct=1.5, gamma=0.99, return_policy=False,
+    c_puct=1.5, gamma=0.99, death_penalty=0.0, return_policy=False,
 ):
     legal = game.legal_moves()
     if not legal:
@@ -65,7 +68,9 @@ def puct_search(
                 leaf_value = -0.5
                 break
             if node.edges is None:
-                priors, leaf_value = _evaluate(net, state, device, cache)
+                priors, leaf_value = _evaluate(
+                    net, state, device, cache, death_penalty,
+                )
                 node.edges = {
                     action_index(s, d): _Edge(float(priors[action_index(s, d)]))
                     for s, d in state.legal_moves()

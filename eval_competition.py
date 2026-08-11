@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--pv-model", default=None)
     ap.add_argument("--puct-simulations", type=int, default=64)
     ap.add_argument("--puct-depth", type=int, default=24)
+    ap.add_argument("--puct-death-penalty", type=float, default=0.0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--json-out", default=None, help="同时保存机器可读结果")
     args = ap.parse_args()
@@ -51,7 +52,7 @@ def main():
         agent.load(args.model)
     elif args.policy == "puct":
         checkpoint = torch.load(args.pv_model, weights_only=True, map_location=args.device)
-        pv_net = PolicyValueNet().to(args.device)
+        pv_net = PolicyValueNet(value_outputs=checkpoint.get("value_outputs", 2)).to(args.device)
         pv_net.load_state_dict(checkpoint["model"])
         pv_net.eval()
 
@@ -79,6 +80,7 @@ def main():
             action = puct_search(
                 game, pv_net, args.device,
                 args.puct_simulations, args.puct_depth,
+                death_penalty=args.puct_death_penalty,
             )
         elif args.policy == "greedy":
             action = greedy_policy(game)

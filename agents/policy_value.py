@@ -7,8 +7,11 @@ from agents.dqn import COLS, GRID_CLASSES, H, N_ACTIONS, index_action
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, hidden=128):
+    def __init__(self, hidden=128, value_outputs=2):
         super().__init__()
+        if value_outputs not in (2, 3):
+            raise ValueError("value_outputs 只能是 2 或 3")
+        self.value_outputs = value_outputs
         col_dim = H * GRID_CLASSES + 1
         global_dim = 6
         self.col_encoder = nn.Sequential(
@@ -29,7 +32,7 @@ class PolicyValueNet(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden // 2),
             nn.ReLU(),
-            nn.Linear(hidden // 2, 2),
+            nn.Linear(hidden // 2, value_outputs),
         )
         pairs = [index_action(i) for i in range(N_ACTIONS)]
         self.register_buffer("src_idx", torch.tensor([s for s, _ in pairs]))
@@ -50,5 +53,8 @@ class PolicyValueNet(nn.Module):
         values = self.value_head(global_features)
         future_n9 = values[:, 0]
         next9_fraction = torch.sigmoid(values[:, 1])
-        return policy, future_n9, next9_fraction
-
+        if self.value_outputs == 3:
+            death_risk = torch.sigmoid(values[:, 2])
+        else:
+            death_risk = torch.zeros_like(future_n9)
+        return policy, future_n9, next9_fraction, death_risk

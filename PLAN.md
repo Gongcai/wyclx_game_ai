@@ -49,9 +49,10 @@
 - **随机 MCTS**：`agents/mcts.py` 在未知掉落处用独立随机样本构造机会结果，已公开 preview 保持不变；`eval_competition.py --policy mcts` 可与 beam 比较首个 9 成本、后续 9 间隔和每千步吞吐。
 - **示范生成**：`generate_demos.py --dist uniform --episodes 100 --workers 4` 并行运行 beam search，仅保存达到目标分数的完整 transition（状态、动作、奖励、下一状态、mask、终止标志）至 `runs/demos/`。
 - **长局示范**：增加 `--continue-after-score --max-moves 500` 后，首个 9 不再终止轨迹，并逐步保存 `n9`/`n9_steps`，用于学习成熟盘面的后续合成成本。
-- **Policy+Value**：`train_policy_value.py` 使用等变列编码，联合预测 beam 动作、未来窗口内折扣 9 数量和距下一个 9 的步数，作为后续 PUCT/MCTS 的先验与叶节点评估。
+- **Policy+Value**：`train_policy_value.py` 使用等变列编码，联合预测 beam/PUCT 动作、未来窗口内折扣 9 数量、距下一个 9 的步数和短期死亡风险，作为后续 PUCT 的先验与叶节点评估。
   - 可一次传入多个 `--demos`；首个 9 后的成熟状态默认使用更高 policy 权重，重点优化后续 9 的边际成本
-- **PUCT**：`agents/puct.py` 在每条模拟中独立采样未知掉落，用 Policy head 提供合法动作先验、Value head 评估叶节点；通过 `eval_competition.py --policy puct --pv-model ...` 测试比赛吞吐。
+  - `--high-tile-policy-weight` 对已有 7/8 的关键盘面额外加权；`--death-horizon` 和 `--death-w` 控制死亡风险目标及损失权重
+- **PUCT**：`agents/puct.py` 在每条模拟中独立采样未知掉落，用 Policy head 提供合法动作先验、Value head 评估叶节点；`--puct-death-penalty` 从叶节点价值扣除预测死亡风险，表示丢失成熟棋盘并重新经历冷启动的机会成本。通过 `eval_competition.py --policy puct --pv-model ...` 测试比赛吞吐。
 - **PUCT 自举**：`generate_puct_demos.py` 保存根节点 30 动作访问分布和实际长局 `n9` 回报；`train_policy_value.py` 可混合 beam 硬标签与 PUCT 软标签，并在列置换增强时同步重排完整动作分布。
 - **行为克隆**：`train_bc.py --demos runs/demos/uniform-beam.pt` 按局划分训练/验证示范，保存的权重可直接传给 `eval.py --model`；由于闭环分布偏移，当前仅作为诊断，不作为 DQN 初始化。
 - **DQfD 式训练**：新训练可加 `--prefill-demos runs/demos/uniform-beam.pt`；示范保存在独立 expert 池，每个 batch 固定按 `--expert-ratio` 抽样，并叠加 `--expert-bc-w` 动作监督损失，避免被在线失败 replay 稀释。

@@ -24,13 +24,14 @@ def main():
     ap.add_argument("--depth", type=int, default=24)
     ap.add_argument("--temperature-moves", type=int, default=20)
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--death-penalty", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=20000)
     ap.add_argument("--out", default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
     checkpoint = torch.load(args.model, weights_only=True, map_location=args.device)
-    net = PolicyValueNet().to(args.device)
+    net = PolicyValueNet(value_outputs=checkpoint.get("value_outputs", 2)).to(args.device)
     net.load_state_dict(checkpoint["model"])
     net.eval()
     weights, capped = load_weights(args.dist)
@@ -48,6 +49,7 @@ def main():
             states.append(encode(game))
             action, policy = puct_search(
                 game, net, args.device, args.simulations, args.depth,
+                death_penalty=args.death_penalty,
                 return_policy=True,
             )
             if game.moves < args.temperature_moves and args.temperature > 0:
@@ -67,6 +69,7 @@ def main():
                 "seed": seed,
                 "score": game.score,
                 "moves": game.moves,
+                "dead": game.dead,
                 "states": torch.stack(states),
                 "actions": torch.tensor(actions, dtype=torch.long),
                 "policy_targets": torch.stack(policy_targets),
@@ -93,6 +96,7 @@ def main():
             "source_model": args.model,
             "simulations": args.simulations,
             "depth": args.depth,
+            "death_penalty": args.death_penalty,
             "episodes": episodes,
         },
         out,
