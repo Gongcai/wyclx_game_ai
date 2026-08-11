@@ -54,6 +54,7 @@
   - `--high-tile-policy-weight` 对已有 7/8 的关键盘面额外加权；`--death-horizon` 和 `--death-w` 控制死亡风险目标及损失权重
   - 单局极值候选使用覆盖整局的长 horizon，并以 `--elite-score-threshold` / `--elite-policy-weight` 提高高分长局的策略权重；该目标与比赛吞吐模型分开筛选
 - **PUCT**：`agents/puct.py` 在每条模拟中独立采样未知掉落，用 Policy head 提供合法动作先验、Value head 评估叶节点；`--puct-death-penalty` 从叶节点价值扣除预测死亡风险，表示丢失成熟棋盘并重新经历冷启动的机会成本。通过 `eval_competition.py --policy puct --pv-model ...` 测试比赛吞吐。
+- **Stochastic MuZero afterstate 实验**：`Game.move_afterstate()` 将确定性玩家动作与随机周期事件分离；PUCT 可用 `--puct-chance-samples N` 建立显式 chance node，并以 `--puct-chance-widening 0.5` 渐进扩展随机结果。默认 0 保持原 root-sampling。第一阶段只替换搜索树，在 16 局留出集上尚未超过旧搜索；后续需联合训练 afterstate Q/chance-aware policy，而不是直接替换部署配置。
 - **PUCT 自举**：`generate_puct_demos.py` 保存根节点 30 动作访问分布和实际长局 `n9` 回报；`train_policy_value.py` 可混合 beam 硬标签与 PUCT 软标签，并在列置换增强时同步重排完整动作分布。
 - **行为克隆**：`train_bc.py --demos runs/demos/uniform-beam.pt` 按局划分训练/验证示范，保存的权重可直接传给 `eval.py --model`；由于闭环分布偏移，当前仅作为诊断，不作为 DQN 初始化。
 - **DQfD 式训练**：新训练可加 `--prefill-demos runs/demos/uniform-beam.pt`；示范保存在独立 expert 池，每个 batch 固定按 `--expert-ratio` 抽样，并叠加 `--expert-bc-w` 动作监督损失，避免被在线失败 replay 稀释。

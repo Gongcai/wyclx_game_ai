@@ -117,6 +117,45 @@ def t_death_prevents_further_moves():
     assert not g.move(1, 0)
 
 
+def t_afterstate_defers_preview_sampling():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 2)
+    g.moves = 2
+    assert g.move_afterstate(1, 0)
+    assert g.moves == 3
+    assert g.preview is None
+    assert g.chance_required()
+    assert not g.legal_moves()
+    assert g.resolve_afterstate([1, 2, 3, 1, 2, 3])
+    assert g.preview == [1, 2, 3, 1, 2, 3]
+    assert g.legal_moves()
+
+
+def t_afterstate_applies_known_preview_deterministically():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 7)
+    g.moves = 3
+    g.preview = [1, 1, 1, 1, 1, 1]
+    assert g.move_afterstate(1, 0)
+    assert not g.chance_required()
+    assert g.resolve_afterstate()
+    assert g.last_drop == [1, 1, 1, 1, 1, 1]
+
+
+def t_afterstate_matches_move_and_rng():
+    direct = Game(rng=random.Random(123))
+    split = Game(rng=random.Random(123))
+    actions = [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (0, 5)]
+    for action in actions:
+        assert direct.move(*action)
+        assert split.move_afterstate(*action)
+        assert split.resolve_afterstate()
+        assert direct.stacks == split.stacks
+        assert direct.preview == split.preview
+        assert direct.last_drop == split.last_drop
+        assert direct.events == split.events
+        assert direct.score == split.score
+        assert direct.dead == split.dead
+
+
 def run_all():
     t_basic_merge()
     t_merge_run_of_4()
@@ -131,6 +170,9 @@ def run_all():
     t_drop_respects_max_merged()
     t_overflow_on_drop()
     t_death_prevents_further_moves()
+    t_afterstate_defers_preview_sampling()
+    t_afterstate_applies_known_preview_deterministically()
+    t_afterstate_matches_move_and_rng()
     print("all tests passed")
 
 

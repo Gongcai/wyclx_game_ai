@@ -23,12 +23,15 @@ class Game:
         self.preview = None
         self.last_drop = None
         self.events = []
+        self._afterstate_pending = False
         return self.observe()
 
     def observe(self):
         return [list(st) for st in self.stacks]
 
     def legal_moves(self):
+        if self._afterstate_pending:
+            return []
         out = []
         for s in range(self.cols):
             if not self.stacks[s]:
@@ -39,7 +42,14 @@ class Game:
         return out
 
     def move(self, src, dst):
-        if self.dead or src == dst or not self.stacks[src]:
+        if not self.move_afterstate(src, dst):
+            return False
+        self.resolve_afterstate()
+        return True
+
+    def move_afterstate(self, src, dst):
+        """执行玩家动作，但暂不生成预告或应用周期掉落。"""
+        if self.dead or self._afterstate_pending or src == dst or not self.stacks[src]:
             return False
         self.events.clear()
         st = self.stacks[src]
@@ -53,21 +63,51 @@ class Game:
         self._merge_col(dst)
         self.moves += 1
         self.last_drop = None
-        if not self.dead:
-            self._cycle()
+        self._afterstate_pending = not self.dead
         return True
 
-    def _cycle(self):
+    def chance_required(self):
+        """当前 afterstate 是否需要采样未知随机事件。"""
+        if not self._afterstate_pending or self.dead:
+            return False
+        return self.moves % 4 == 3 or (
+            self.moves % 4 == 0 and self.preview is None
+        )
+
+    def sample_chance(self, rng=None):
+        """按当前 afterstate 的掉落上限采样完整六列随机结果。"""
+        rng = rng or self.rng
+        return [self.drop_sampler(rng, self.max_merged) for _ in range(self.cols)]
+
+    def resolve_afterstate(self, chance=None):
+        """将随机结果应用到 pending afterstate，恢复为正常决策状态。"""
+        if not self._afterstate_pending:
+            return False
+        self._afterstate_pending = False
+        if self.dead:
+            return True
         if self.moves % 4 == 3:
-            self.preview = [self._sample() for _ in range(self.cols)]
+            values = self.sample_chance() if chance is None else list(chance)
+            if len(values) != self.cols:
+                raise ValueError(f"随机掉落应有 {self.cols} 列，实际 {len(values)}")
+            self.preview = values
         elif self.moves % 4 == 0:
-            self._apply_drops()
+            if self.preview is not None:
+                if chance is not None and list(chance) != self.preview:
+                    raise ValueError("已有 preview 时不得提供不同的随机结果")
+                self._apply_drops()
+            else:
+                values = self.sample_chance() if chance is None else list(chance)
+                self._apply_drops(values)
+        return True
 
     def _sample(self):
         return self.drop_sampler(self.rng, self.max_merged)
 
-    def _apply_drops(self):
-        values = self.preview if self.preview is not None else [self._sample() for _ in range(self.cols)]
+    def _apply_drops(self, values=None):
+        values = self.preview if self.preview is not None else (
+            self.sample_chance() if values is None else list(values)
+        )
         self.preview = None
         for c, v in enumerate(values):
             self.stacks[c].insert(0, v)

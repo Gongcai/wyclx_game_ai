@@ -15,12 +15,53 @@ class _Edge:
         self.visits = 0
         self.value = 0.0
         self.child = _Node()
+        self.chance = None
 
 
 class _Node:
     def __init__(self):
         self.visits = 0
         self.edges = None
+
+
+class _ChanceOutcome:
+    def __init__(self, values):
+        self.values = values
+        self.child = _Node()
+
+
+class _ChanceNode:
+    """用固定蒙特卡洛粒子近似一个 afterstate 的随机转移分布。"""
+
+    def __init__(self):
+        self.particles = None
+        self.outcomes = None
+        self.visits = 0
+
+    def _add_particle(self, state, rng):
+        values = tuple(state.sample_chance(rng))
+        outcome = self.outcomes.get(values)
+        if outcome is None:
+            outcome = _ChanceOutcome(values)
+            self.outcomes[values] = outcome
+        self.particles.append(outcome)
+
+    def sample(self, state, rng, n_samples, widening):
+        if self.particles is None:
+            self.particles = []
+            self.outcomes = {}
+            if widening <= 0:
+                for _ in range(max(1, n_samples)):
+                    self._add_particle(state, rng)
+        if widening > 0:
+            target = min(
+                max(1, n_samples),
+                max(1, math.ceil((self.visits + 1) ** widening)),
+            )
+            if len(self.particles) < target:
+                self._add_particle(state, rng)
+        self.visits += 1
+        return rng.choice(self.particles)
 
 
 @torch.no_grad()
@@ -44,7 +85,8 @@ def _evaluate(net, game, device, cache, death_penalty):
 
 def puct_search(
     game, net, device="cpu", simulations=64, depth=24,
-    c_puct=1.5, gamma=0.99, death_penalty=0.0, return_policy=False,
+    c_puct=1.5, gamma=0.99, death_penalty=0.0, chance_samples=0,
+    chance_widening=0.0, return_policy=False,
 ):
     legal = game.legal_moves()
     if not legal:
@@ -83,12 +125,30 @@ def puct_search(
                     item[1].value / item[1].visits if item[1].visits else 0.0
                 ) + c_puct * item[1].prior * sqrt_n / (1 + item[1].visits),
             )
-            if not state.move(*index_action(action_id)):
-                leaf_value = -0.5
-                break
+            action = index_action(action_id)
+            if chance_samples > 0:
+                if not state.move_afterstate(*action):
+                    leaf_value = -0.5
+                    break
+                if state.chance_required():
+                    if edge.chance is None:
+                        edge.chance = _ChanceNode()
+                    outcome = edge.chance.sample(
+                        state, rng, chance_samples, chance_widening,
+                    )
+                    state.resolve_afterstate(outcome.values)
+                    child = outcome.child
+                else:
+                    state.resolve_afterstate()
+                    child = edge.child
+            else:
+                if not state.move(*action):
+                    leaf_value = -0.5
+                    break
+                child = edge.child
             reward = float(sum(event >= 9 for event in state.events))
             path.append((node, edge, reward))
-            node = edge.child
+            node = child
         value = leaf_value
         for visited, edge, reward in reversed(path):
             value = reward + gamma * value

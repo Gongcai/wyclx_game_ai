@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--temperature-moves", type=int, default=20)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--death-penalty", type=float, default=0.0)
+    ap.add_argument("--chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
+    ap.add_argument("--chance-widening", type=float, default=0.0, help="chance node 渐进扩展指数，建议 0.5")
     ap.add_argument("--gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--seed", type=int, default=20000)
     ap.add_argument("--out", default=None)
@@ -53,6 +55,8 @@ def main():
                 game, net, args.device, args.simulations, args.depth,
                 gamma=gamma,
                 death_penalty=args.death_penalty,
+                chance_samples=args.chance_samples,
+                chance_widening=args.chance_widening,
                 return_policy=True,
             )
             if game.moves < args.temperature_moves and args.temperature > 0:
@@ -100,6 +104,8 @@ def main():
             "simulations": args.simulations,
             "depth": args.depth,
             "death_penalty": args.death_penalty,
+            "chance_samples": args.chance_samples,
+            "chance_widening": args.chance_widening,
             "gamma": gamma,
             "episodes": episodes,
         },

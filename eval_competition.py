@@ -35,6 +35,8 @@ def main():
     ap.add_argument("--puct-simulations", type=int, default=64)
     ap.add_argument("--puct-depth", type=int, default=24)
     ap.add_argument("--puct-death-penalty", type=float, default=0.0)
+    ap.add_argument("--puct-chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
+    ap.add_argument("--puct-chance-widening", type=float, default=0.0)
     ap.add_argument("--puct-gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--json-out", default=None, help="同时保存机器可读结果")
@@ -85,6 +87,8 @@ def main():
                 args.puct_simulations, args.puct_depth,
                 gamma=puct_gamma,
                 death_penalty=args.puct_death_penalty,
+                chance_samples=args.puct_chance_samples,
+                chance_widening=args.puct_chance_widening,
             )
         elif args.policy == "greedy":
             action = greedy_policy(game)
