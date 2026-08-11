@@ -7,7 +7,7 @@ COLS = 6
 H = 7
 N_ACTIONS = COLS * (COLS - 1)
 GRID_CLASSES = 9
-META_DIM = 4 + COLS + 1
+META_DIM = 4 + COLS + 2
 
 
 def action_index(src, dst):
@@ -44,13 +44,15 @@ def encode(game, device="cpu"):
         st = game.stacks[c]
         for i, v in enumerate(st):
             if i < H:
-                g[(c * H + i) * GRID_CLASSES + v] = 1
+                assert 1 <= v <= GRID_CLASSES, f"值 {v} 超出编码类别"
+                g[(c * H + i) * GRID_CLASSES + v - 1] = 1
     meta = torch.zeros(META_DIM, device=device)
     meta[game.moves % 4] = 1
-    if game.preview:
+    if game.preview is not None:
+        meta[4 + COLS] = 1.0
         for c in range(COLS):
             meta[4 + c] = game.preview[c] / 7.0
-    meta[4 + COLS] = game.max_merged / 7.0
+    meta[5 + COLS] = min(game.max_merged, 7) / 7.0
     return torch.cat([g, meta])
 
 
@@ -69,6 +71,7 @@ class DQN:
         self.target.load_state_dict(self.online.state_dict())
         self.opt = torch.optim.Adam(self.online.parameters(), lr=lr)
         self.replay = []
+        self.expert = []
         self.replay_max = replay
         self.pos = 0
         self.train_steps = 0
@@ -76,8 +79,11 @@ class DQN:
     def remember(self, s, a, r, ns, nmask, done):
         if len(self.replay) < self.replay_max:
             self.replay.append(None)
-        self.replay[self.pos] = (s, a, r, ns, nmask, done)
+        self.replay[self.pos] = (s.cpu(), a, r, ns.cpu(), nmask.cpu(), done)
         self.pos = (self.pos + 1) % self.replay_max
+
+    def remember_expert(self, s, a, r, ns, nmask, done):
+        self.expert.append((s.cpu(), a, r, ns.cpu(), nmask.cpu(), done))
 
     @torch.no_grad()
     def act(self, s, mask, eps):
@@ -88,18 +94,22 @@ class DQN:
         q = q.masked_fill(~mask.bool(), float("-inf"))
         return int(q.argmax())
 
-    def learn(self, batch_size, gamma, target_sync):
-        if len(self.replay) < batch_size:
+    def learn(self, batch_size, gamma, target_sync, expert_ratio=0.0, expert_bc_w=0.0):
+        n_expert = min(len(self.expert), round(batch_size * expert_ratio))
+        n_replay = batch_size - n_expert
+        if len(self.replay) < n_replay:
             return None
-        idx = random.sample(range(len(self.replay)), batch_size)
-        s = torch.stack([self.replay[i][0] for i in idx])
-        a = torch.tensor([self.replay[i][1] for i in idx], device=self.device)
-        r = torch.tensor([self.replay[i][2] for i in idx], device=self.device)
-        ns = torch.stack([self.replay[i][3] for i in idx])
-        nmask = torch.stack([self.replay[i][4] for i in idx])
-        done = torch.tensor([self.replay[i][5] for i in idx], device=self.device)
+        samples = random.sample(self.expert, n_expert) if n_expert else []
+        samples += random.sample(self.replay, n_replay)
+        s = torch.stack([item[0] for item in samples]).to(self.device)
+        a = torch.tensor([item[1] for item in samples], device=self.device)
+        r = torch.tensor([item[2] for item in samples], device=self.device)
+        ns = torch.stack([item[3] for item in samples]).to(self.device)
+        nmask = torch.stack([item[4] for item in samples]).to(self.device)
+        done = torch.tensor([item[5] for item in samples], device=self.device)
 
-        q = self.online(s).gather(1, a.unsqueeze(1)).squeeze(1)
+        q_all = self.online(s)
+        q = q_all.gather(1, a.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
             pick = self.online(ns).masked_fill(~nmask.bool(), float("-inf")).argmax(1)
             nq = self.target(ns).gather(1, pick.unsqueeze(1)).squeeze(1)
@@ -107,6 +117,10 @@ class DQN:
         target = r + gamma * nq * (1 - done)
 
         loss = torch.nn.functional.mse_loss(q, target)
+        if n_expert and expert_bc_w:
+            loss = loss + expert_bc_w * torch.nn.functional.cross_entropy(
+                q_all[:n_expert], a[:n_expert]
+            )
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -121,3 +135,44 @@ class DQN:
     def load(self, path):
         self.online.load_state_dict(torch.load(path, weights_only=True, map_location=self.device))
         self.target.load_state_dict(self.online.state_dict())
+
+    def save_full(self, path, **extra):
+        def _cpu(x):
+            if isinstance(x, dict):
+                return {k: _cpu(v) for k, v in x.items()}
+            if isinstance(x, (list, tuple)):
+                return type(x)(_cpu(v) for v in x)
+            if isinstance(x, torch.Tensor):
+                return x.cpu()
+            return x
+
+        torch.save(
+            {
+                "online": {k: v.cpu() for k, v in self.online.state_dict().items()},
+                "target": {k: v.cpu() for k, v in self.target.state_dict().items()},
+                "opt": _cpu(self.opt.state_dict()),
+                "replay": self.replay,
+                "expert": self.expert,
+                "pos": self.pos,
+                "replay_max": self.replay_max,
+                "train_steps": self.train_steps,
+                **extra,
+            },
+            path,
+        )
+
+    def load_full(self, path):
+        d = torch.load(path, weights_only=True, map_location="cpu")
+        self.online.load_state_dict(d["online"])
+        self.target.load_state_dict(d["target"])
+        self.opt.load_state_dict(d["opt"])
+        for state in self.opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(self.device)
+        self.replay = d["replay"]
+        self.expert = d.get("expert", [])
+        self.pos = d["pos"]
+        self.replay_max = d["replay_max"]
+        self.train_steps = d["train_steps"]
+        return d

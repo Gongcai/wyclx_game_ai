@@ -4,6 +4,7 @@ import random
 from agents.baselines import play
 from agents.dist import load_weights, make_sampler
 from agents.dqn import DQN, encode, index_action, legal_mask
+from agents.search import beam_policy
 from game import Game
 
 
@@ -14,7 +15,19 @@ def main():
     ap.add_argument("--n", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if __import__("torch").cuda.is_available() else "cpu")
+    ap.add_argument("--search-depth", type=int, default=4)
+    ap.add_argument("--beam-width", type=int, default=8)
+    ap.add_argument(
+        "--policies",
+        default="agent,beam,greedy,random",
+        help="逗号分隔：agent,beam,greedy,random",
+    )
     args = ap.parse_args()
+
+    policies = tuple(item.strip() for item in args.policies.split(",") if item.strip())
+    allowed = {"agent", "beam", "greedy", "random"}
+    if not policies or not set(policies) <= allowed:
+        raise ValueError(f"policies 必须属于 {sorted(allowed)}")
 
     weights, capped = load_weights(args.dist)
     base = random.Random(args.seed)
@@ -24,10 +37,10 @@ def main():
         agent.load(args.model)
 
     print(f"dist={args.dist}  n={args.n}  model={args.model or '无'}")
-    for policy in ("agent", "greedy", "random"):
+    for policy in policies:
         if policy == "agent" and agent is None:
             continue
-        tot_score = tot_steps = tot_n9 = 0
+        tot = [0.0] * 6  # score, steps, n9, max_merged, fullness, success
         for i in range(args.n):
             g = Game(
                 rng=random.Random(base.randint(0, 2**31)),
@@ -40,13 +53,24 @@ def main():
                     src, dst = index_action(a)
                     if not g.move(src, dst):
                         break
-                score, steps, n9 = g.score, g.moves, g.score // 9
+            elif policy == "beam":
+                while not g.dead:
+                    action = beam_policy(g, args.search_depth, args.beam_width)
+                    if action is None or not g.move(*action):
+                        break
             else:
-                score, steps, n9 = play(g, policy)
-            tot_score += score
-            tot_steps += steps
-            tot_n9 += n9
-        print(f"{policy:6s}  平均得分 {tot_score / args.n:7.2f}  平均步数 {tot_steps / args.n:7.1f}  平均合成9 {tot_n9 / args.n:6.2f}")
+                play(g, policy)
+            tot[0] += g.score
+            tot[1] += g.moves
+            tot[2] += g.score // 9
+            tot[3] += g.max_merged
+            tot[4] += sum(len(st) for st in g.stacks)
+            tot[5] += g.score > 0
+        print(
+            f"{policy:6s}  平均得分 {tot[0] / args.n:7.2f}  平均步数 {tot[1] / args.n:7.1f}"
+            f"  平均合成9 {tot[2] / args.n:6.2f}  成功率 {tot[5] / args.n:5.1%}"
+            f"  最大合成 {tot[3] / args.n:4.2f}  满度 {tot[4] / args.n:5.1f}"
+        )
 
 
 if __name__ == "__main__":

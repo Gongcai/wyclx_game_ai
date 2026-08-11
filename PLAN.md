@@ -13,7 +13,7 @@
 | 规则 | 实现 |
 |---|---|
 | 栈模型 | 6 列 × 高 7，栈底在下，栈顶进出；整段相同元素一起出栈 |
-| 合并 | 栈顶连续 ≥3 个相同值全部合成 n+1；9 得分(+100)后消失；合成后再查（链式） |
+| 合并 | 栈顶连续 ≥3 个相同值全部合成 n+1；9 得分(+9)后消失；合成后再查（链式） |
 | 掉落 | 每 4 步、6 列各掉一个，值 ∈ [1, min(7, 已合成最大值)]；第 3 步后六列各自预告，预告即实际掉落值 |
 | 死亡 | 任意列高度 > 7（合并先于死亡判定）；允许自杀式操作 |
 | 分布 | 可配置权重，预设 uniform / low / high / mid |
@@ -27,28 +27,33 @@
 - 动作空间 6×5=30（含自杀）；非法动作仅"源列空/同列"
 - 环境带事件钩子 `Game.events`：每次动作产生的合并值（含掉落合并），供奖励计算
 - 掉落分布由 `drop_sampler(rng, max_merged)` 注入（`agents/dist.py`，支持 cap 与任意权重）
-- 状态编码（`agents/dqn.py`）：6×7 网格 one-hot（9 类）+ 元特征（周期步数、六列预告、已合成最大值）
+- 状态编码（`agents/dqn.py`）：6×7 网格 one-hot（值 1~8 → 类别 0~7，类别 8 预留防越界）+ 元特征（周期相位 4、六列预告/7、预告存在标志、掉落上限 min(7,max_merged)/7）
 
 ### 3.2 奖励（已确认方案 B，按事件实现）
 
-- 合成 9：+10
-- 中间合成：+0.5 × 新值
+- 合成 9：游戏得分 `+9`；训练奖励 `+10`
+- 中间合成：`--merge-w` × 新值（默认 `1.0`）
 - 每步：−0.05
 - 死亡：−5（引导 AI 优先存活）
 
 ### 3.3 算法
 
 - **首选 DQN**（`agents/dqn.py`）：Double DQN + 目标网络 + 经验回放（+ 优先回放，如训练不稳定再加）
-  - 网络：MLP(389 → 256 → 256 → 30)，输入 one-hot 网格 + 元特征，输出 30 维 Q
+  - 网络：MLP(390 → 256 → 256 → 30)，输入 one-hot 网格 + 元特征，输出 30 维 Q
   - ε-greedy：1.0 → 0.05（默认 20 万步线性衰减）
   - 全动作可执行（自杀合法），用 legal_mask 屏蔽"源空/同列"动作
 - **基线对照**（`agents/baselines.py`）：随机合法动作、贪心（模拟每个合法动作取即时收益+栈高惩罚）
-- **升级路线**：DQN 平台期后 → MCTS（+价值网络，AlphaZero 式单人）/ beam search
+- **搜索基线**：`eval.py` 已提供基于真实 `Game` 深拷贝的 beam search（`--search-depth`、`--beam-width`）；已公开掉落预告按真实值规划，未知未来掉落使用仅由可观察盘面构造的确定性模拟种子，禁止读取真实 RNG 隐藏状态。它计算较慢，但可用于验证可达性和生成示范轨迹。
+- **示范生成**：`generate_demos.py --dist uniform --episodes 100 --workers 4` 并行运行 beam search，仅保存达到目标分数的完整 transition（状态、动作、奖励、下一状态、mask、终止标志）至 `runs/demos/`。
+- **行为克隆**：`train_bc.py --demos runs/demos/uniform-beam.pt` 按局划分训练/验证示范，保存的权重可直接传给 `eval.py --model`；由于闭环分布偏移，当前仅作为诊断，不作为 DQN 初始化。
+- **DQfD 式训练**：新训练可加 `--prefill-demos runs/demos/uniform-beam.pt`；示范保存在独立 expert 池，每个 batch 固定按 `--expert-ratio` 抽样，并叠加 `--expert-bc-w` 动作监督损失，避免被在线失败 replay 稀释。
+- **DAgger**：`train_dagger.py` 让当前策略进入自己的状态分布，并逐步降低教师执行概率；每个访问状态都由无 oracle beam 标注后加入聚合数据，用于修复纯行为克隆的闭环分布偏移。
+- **升级路线**：beam search 示范预填充 → DQN 微调；DQN 平台期后再考虑 MCTS（+价值网络，AlphaZero 式单人）
 
 ### 3.4 训练工程
 
 - `train.py`：多环境并行（--n-envs 8），每步训练，`runs/<run_id>/` 存 best.pt / final.pt / metrics.jsonl
-- `eval.py`：固定种子 N 局，对比 agent / greedy / random，输出平均得分、存活步数、合成 9 数
+- `eval.py`：固定种子 N 局，对比 agent / beam / greedy / random，输出平均得分、存活步数、合成 9 数
 - 死亡局编码保护：栈可临时高 8，编码槽位按 7 截断
 
 ### 3.5 多分布 model selection

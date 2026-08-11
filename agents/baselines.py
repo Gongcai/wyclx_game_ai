@@ -15,7 +15,7 @@ def random_policy(game):
 def immediate_reward(game):
     n9 = sum(1 for v in game.events if v >= 9)
     interm = sum(v for v in game.events if v < 9)
-    return 10.0 * n9 + 0.5 * interm
+    return 10.0 * n9 + 1.0 * interm
 
 
 def greedy_policy(game):

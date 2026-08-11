@@ -9,7 +9,9 @@ class Game:
     def __init__(self, cols=6, rng=None, drop_sampler=None):
         self.cols = cols
         self.rng = rng or random.Random()
-        self.drop_sampler = drop_sampler or (lambda rng: rng.randint(1, DROP_MAX))
+        self.drop_sampler = drop_sampler or (
+            lambda rng, max_merged=None: rng.randint(1, min(DROP_MAX, max_merged or DROP_MAX))
+        )
         self.reset()
 
     def reset(self):
@@ -40,8 +42,14 @@ class Game:
         if self.dead or src == dst or not self.stacks[src]:
             return False
         self.events.clear()
-        v = self.stacks[src].pop(0)
-        self.stacks[dst].insert(0, v)
+        st = self.stacks[src]
+        v = st[0]
+        k = 1
+        while k < len(st) and st[k] == v:
+            k += 1
+        seg = st[:k]
+        del st[:k]
+        self.stacks[dst][:0] = seg
         self._merge_col(dst)
         self.moves += 1
         self.last_drop = None
@@ -56,19 +64,17 @@ class Game:
             self._apply_drops()
 
     def _sample(self):
-        return self.drop_sampler(self.rng)
+        return self.drop_sampler(self.rng, self.max_merged)
 
     def _apply_drops(self):
-        values = []
-        for c in range(self.cols):
-            v = self._sample()
-            values.append(v)
+        values = self.preview if self.preview is not None else [self._sample() for _ in range(self.cols)]
+        self.preview = None
+        for c, v in enumerate(values):
             self.stacks[c].insert(0, v)
             self._merge_col(c)
             if self.dead:
                 break
         self.last_drop = values
-        self.preview = None
 
     def _merge_col(self, c):
         st = self.stacks[c]

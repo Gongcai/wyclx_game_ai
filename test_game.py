@@ -42,7 +42,7 @@ def t_suicide_allowed():
 
 
 def t_drop_cycle():
-    g = Game(rng=random.Random(1), drop_sampler=lambda rng: 1)
+    g = Game(rng=random.Random(1), drop_sampler=lambda rng, m=None: 1)
     g.move(1, 0)
     g.move(2, 1)
     g.move(3, 2)
@@ -53,7 +53,7 @@ def t_drop_cycle():
 
 
 def t_drop_can_merge():
-    g = Game(rng=random.Random(0), drop_sampler=lambda rng: 1)
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
     g.stacks = [[1, 1], [1], [], [], [], []]
     g.moves = 3
     g.move(1, 0)
@@ -61,11 +61,53 @@ def t_drop_can_merge():
 
 
 def t_overflow_on_drop():
-    g = Game(rng=random.Random(0), drop_sampler=lambda rng: 1)
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
     g.stacks = [[7, 6, 5, 4, 3, 2, 1], [1], [], [], [], []]
     g.moves = 3
     g.move(1, 0)
     assert g.dead
+
+
+def t_preview_matches_actual_drop():
+    seq = [1, 3, 2, 1, 7, 5, 4, 2, 1, 3, 6, 1]
+    it = iter(seq)
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: next(it))
+    g.move(1, 0)
+    g.move(2, 1)
+    g.move(3, 2)
+    assert g.preview == seq[:6], g.preview
+    g.move(4, 3)
+    assert g.preview is None
+    assert g.last_drop == seq[:6], g.last_drop
+
+
+def t_drop_respects_max_merged():
+    g = Game(
+        rng=random.Random(0),
+        drop_sampler=lambda rng, m=None: rng.randint(1, min(7, m or 7)),
+    )
+    g.stacks = [[2, 2], [2], [], [], [], []]
+    g.max_merged = 2
+    g.moves = 3
+    g.move(1, 0)
+    assert g.max_merged == 3
+    assert all(v <= g.max_merged for v in g.last_drop), g.last_drop
+
+
+def t_run_moves_together():
+    g = Game(rng=random.Random(0))
+    g.stacks = [[1, 1, 2], [], [], [], [], []]
+    g.move(0, 1)
+    assert g.stacks[0] == [2], g.stacks[0]
+    assert g.stacks[1] == [1, 1], g.stacks[1]
+
+
+def t_run_move_can_merge():
+    g = Game(rng=random.Random(0))
+    g.stacks = [[1, 2], [1, 1], [], [], [], []]
+    g.move(1, 0)
+    assert g.stacks[0] == [2, 2], g.stacks[0]
+    assert g.stacks[1] == [], g.stacks[1]
 
 
 def t_death_prevents_further_moves():
@@ -81,8 +123,12 @@ def run_all():
     t_cascade()
     t_merge_9()
     t_suicide_allowed()
+    t_run_moves_together()
+    t_run_move_can_merge()
     t_drop_cycle()
     t_drop_can_merge()
+    t_preview_matches_actual_drop()
+    t_drop_respects_max_merged()
     t_overflow_on_drop()
     t_death_prevents_further_moves()
     print("all tests passed")
