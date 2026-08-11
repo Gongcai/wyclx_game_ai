@@ -15,6 +15,7 @@ def main():
     ap.add_argument("--n", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if __import__("torch").cuda.is_available() else "cpu")
+    ap.add_argument("--arch", choices=("mlp", "equivariant"), default="mlp")
     ap.add_argument("--search-depth", type=int, default=4)
     ap.add_argument("--beam-width", type=int, default=8)
     ap.add_argument(
@@ -33,7 +34,7 @@ def main():
     base = random.Random(args.seed)
     agent = None
     if args.model:
-        agent = DQN(device=args.device)
+        agent = DQN(device=args.device, arch=args.arch)
         agent.load(args.model)
 
     print(f"dist={args.dist}  n={args.n}  model={args.model or '无'}")

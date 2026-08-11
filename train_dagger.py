@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from agents.dist import load_weights, make_sampler
-from agents.dqn import Net, action_index, encode, index_action, legal_mask
+from agents.dqn import action_index, encode, index_action, legal_mask, make_net
 from agents.search import beam_policy
 from game import Game
 
@@ -90,6 +90,7 @@ def main():
     ap.add_argument("--eval-n", type=int, default=50)
     ap.add_argument("--seed", type=int, default=10000)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--arch", choices=("mlp", "equivariant"), default="mlp")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -100,7 +101,7 @@ def main():
     states = torch.cat([episode["states"] for episode in episodes]).float()
     actions = torch.cat([episode["actions"] for episode in episodes]).long()
     weights, capped = load_weights(args.dist)
-    net = Net().to(args.device)
+    net = make_net(args.arch).to(args.device)
     if args.init_model:
         net.load_state_dict(torch.load(args.init_model, weights_only=True, map_location=args.device))
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)

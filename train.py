@@ -96,12 +96,13 @@ def main():
     ap.add_argument("--expert-ratio", type=float, default=0.25, help="每个 batch 的固定示范比例")
     ap.add_argument("--expert-bc-w", type=float, default=1.0, help="示范动作监督损失权重")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--arch", choices=("mlp", "equivariant"), default="mlp")
     args = ap.parse_args()
 
     device = args.device
     weights, capped = load_weights(args.dist)
     envs = [make_env(weights, capped, args.seed * 1000 + i) for i in range(args.n_envs)]
-    agent = DQN(lr=args.lr, replay=args.replay, device=device)
+    agent = DQN(lr=args.lr, replay=args.replay, device=device, arch=args.arch)
 
     if args.prefill_demos and args.resume:
         raise ValueError("prefill-demos 不能与 resume 同时使用")

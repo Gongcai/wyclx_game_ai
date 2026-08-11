@@ -8,7 +8,7 @@ import random
 import torch
 import torch.nn.functional as F
 
-from agents.dqn import COLS, GRID_CLASSES, H, META_DIM, Net
+from agents.dqn import COLS, GRID_CLASSES, H, META_DIM, make_net
 
 
 def load_episodes(path):
@@ -23,11 +23,20 @@ def load_episodes(path):
     return data, episodes
 
 
-def batches(states, actions, batch_size, generator):
+def batches(states, actions, weights, batch_size, generator):
     order = torch.randperm(len(actions), generator=generator)
     for start in range(0, len(order), batch_size):
         idx = order[start:start + batch_size]
-        yield states[idx], actions[idx]
+        yield states[idx], actions[idx], weights[idx]
+
+
+def trajectory_weights(episodes, goal_weight):
+    out = []
+    for episode in episodes:
+        n = len(episode["actions"])
+        progress = torch.linspace(0.0, 1.0, n)
+        out.append(1.0 + goal_weight * progress.square())
+    return torch.cat(out)
 
 
 def augment_columns(states, actions, generator):
@@ -73,7 +82,9 @@ def main():
     ap.add_argument("--val-ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-augment-columns", action="store_true")
+    ap.add_argument("--goal-weight", type=float, default=0.0, help="成功轨迹后段的额外监督权重")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--arch", choices=("mlp", "equivariant"), default="mlp")
     args = ap.parse_args()
 
     if args.epochs <= 0 or args.batch <= 0 or not 0 < args.val_ratio < 1:
@@ -89,10 +100,11 @@ def main():
     val_eps = [episode for i, episode in enumerate(episodes) if i in val_ids]
     train_s = torch.cat([episode["states"] for episode in train_eps]).float()
     train_a = torch.cat([episode["actions"] for episode in train_eps]).long()
+    train_w = trajectory_weights(train_eps, args.goal_weight)
     val_s = torch.cat([episode["states"] for episode in val_eps]).float()
     val_a = torch.cat([episode["actions"] for episode in val_eps]).long()
 
-    net = Net().to(args.device)
+    net = make_net(args.arch).to(args.device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     generator = torch.Generator().manual_seed(args.seed)
     best_acc = -1.0
@@ -105,11 +117,17 @@ def main():
         net.train()
         loss_sum = 0.0
         count = 0
-        for states, actions in batches(train_s, train_a, args.batch, generator):
+        for states, actions, weights_batch in batches(
+            train_s, train_a, train_w, args.batch, generator
+        ):
             if not args.no_augment_columns:
                 states, actions = augment_columns(states, actions, generator)
             logits = net(states.to(args.device))
-            loss = F.cross_entropy(logits, actions.to(args.device))
+            per_sample = F.cross_entropy(
+                logits, actions.to(args.device), reduction="none"
+            )
+            weights_batch = weights_batch.to(args.device)
+            loss = (per_sample * weights_batch).sum() / weights_batch.sum()
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -140,6 +158,8 @@ def main():
                 "val_transitions": len(val_a),
                 "best_val_accuracy": best_acc,
                 "column_augmentation": not args.no_augment_columns,
+                "arch": args.arch,
+                "goal_weight": args.goal_weight,
             },
             f,
             indent=2,

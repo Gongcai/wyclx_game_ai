@@ -38,6 +38,54 @@ class Net(nn.Module):
         return self.fc(x)
 
 
+class EquivariantNet(nn.Module):
+    """共享列编码器 + 有序源/目标成对打分，严格保持列置换等变。"""
+
+    def __init__(self, hidden=128):
+        super().__init__()
+        col_dim = H * GRID_CLASSES + 1  # 单列网格 + 该列预告
+        global_dim = 4 + 2  # 周期相位 + 预告存在标志 + 掉落上限
+        self.col_encoder = nn.Sequential(
+            nn.Linear(col_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+        )
+        self.pair_head = nn.Sequential(
+            nn.Linear(hidden * 3 + global_dim, hidden * 2),
+            nn.ReLU(),
+            nn.Linear(hidden * 2, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+        pairs = [index_action(i) for i in range(N_ACTIONS)]
+        self.register_buffer("src_idx", torch.tensor([s for s, _ in pairs]))
+        self.register_buffer("dst_idx", torch.tensor([d for _, d in pairs]))
+
+    def forward(self, x):
+        grid_dim = COLS * H * GRID_CLASSES
+        grid = x[:, :grid_dim].reshape(-1, COLS, H * GRID_CLASSES)
+        meta = x[:, grid_dim:]
+        preview = meta[:, 4:4 + COLS].unsqueeze(-1)
+        col = self.col_encoder(torch.cat([grid, preview], dim=-1))
+        pooled = col.mean(dim=1)
+        global_meta = torch.cat([meta[:, :4], meta[:, 4 + COLS:]], dim=1)
+        pair_global = torch.cat([pooled, global_meta], dim=1)
+        pair_global = pair_global.unsqueeze(1).expand(-1, N_ACTIONS, -1)
+        pair = torch.cat(
+            [col[:, self.src_idx], col[:, self.dst_idx], pair_global], dim=-1
+        )
+        return self.pair_head(pair).squeeze(-1)
+
+
+def make_net(arch="mlp"):
+    if arch == "mlp":
+        return Net()
+    if arch == "equivariant":
+        return EquivariantNet()
+    raise ValueError(f"未知网络结构: {arch}")
+
+
 def encode(game, device="cpu"):
     g = torch.zeros(COLS * H * GRID_CLASSES, device=device)
     for c in range(COLS):
@@ -64,10 +112,11 @@ def legal_mask(game, device="cpu"):
 
 
 class DQN:
-    def __init__(self, lr=3e-4, replay=100_000, device="cpu"):
+    def __init__(self, lr=3e-4, replay=100_000, device="cpu", arch="mlp"):
         self.device = device
-        self.online = Net().to(device)
-        self.target = Net().to(device)
+        self.arch = arch
+        self.online = make_net(arch).to(device)
+        self.target = make_net(arch).to(device)
         self.target.load_state_dict(self.online.state_dict())
         self.opt = torch.optim.Adam(self.online.parameters(), lr=lr)
         self.replay = []
@@ -156,6 +205,7 @@ class DQN:
                 "pos": self.pos,
                 "replay_max": self.replay_max,
                 "train_steps": self.train_steps,
+                "arch": self.arch,
                 **extra,
             },
             path,
@@ -163,6 +213,9 @@ class DQN:
 
     def load_full(self, path):
         d = torch.load(path, weights_only=True, map_location="cpu")
+        saved_arch = d.get("arch", "mlp")
+        if saved_arch != self.arch:
+            raise ValueError(f"checkpoint arch={saved_arch}，当前 arch={self.arch}")
         self.online.load_state_dict(d["online"])
         self.target.load_state_dict(d["target"])
         self.opt.load_state_dict(d["opt"])
