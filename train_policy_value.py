@@ -115,6 +115,10 @@ def main():
     ap.add_argument("--afterstate-q-w", type=float, default=0.0)
     ap.add_argument("--init-model", default=None)
     ap.add_argument("--freeze-base-for-q", action="store_true")
+    ap.add_argument(
+        "--policy-head-only", action="store_true",
+        help="冻结编码器和价值头，只蒸馏 PUCT 策略头",
+    )
     ap.add_argument("--death-horizon", type=int, default=16)
     ap.add_argument("--mature-policy-weight", type=float, default=1.0, help="首个9之后状态的额外策略权重")
     ap.add_argument("--high-tile-policy-weight", type=float, default=0.0, help="棋盘含7/8状态的额外策略权重")
@@ -215,6 +219,11 @@ def main():
             raise ValueError("--freeze-base-for-q 需要 Q 头和 --init-model")
         for name, parameter in net.named_parameters():
             parameter.requires_grad = name.startswith("afterstate_q_head.")
+    if args.policy_head_only:
+        if args.freeze_base_for_q or use_afterstate_q or not args.init_model:
+            raise ValueError("--policy-head-only 需要 --init-model，且不能与 Q 头训练同时使用")
+        for name, parameter in net.named_parameters():
+            parameter.requires_grad = name.startswith("policy_head.")
     opt = torch.optim.Adam(
         [parameter for parameter in net.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -267,11 +276,14 @@ def main():
             net, val[0], val[1], val[2], val[3], val[4], val[5],
             args.device, args.batch, use_afterstate_q,
         )
-        val_loss = (
-            0.2 * stats[1] + stats[2] + stats[3]
-            + args.death_w * stats[4]
-            + args.afterstate_q_w * stats[5]
-        )
+        if args.policy_head_only:
+            val_loss = stats[1]
+        else:
+            val_loss = (
+                0.2 * stats[1] + stats[2] + stats[3]
+                + args.death_w * stats[4]
+                + args.afterstate_q_w * stats[5]
+            )
         if val_loss < best_loss:
             best_loss = val_loss
             best = {key: value.detach().cpu().clone() for key, value in net.state_dict().items()}
@@ -312,6 +324,7 @@ def main():
                 "afterstate_q_weight": args.afterstate_q_w,
                 "init_model": args.init_model,
                 "freeze_base_for_q": args.freeze_base_for_q,
+                "policy_head_only": args.policy_head_only,
             },
             f,
             indent=2,
