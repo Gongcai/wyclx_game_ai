@@ -8,6 +8,7 @@ H = 7
 N_ACTIONS = COLS * (COLS - 1)
 GRID_CLASSES = 9
 META_DIM = 4 + COLS + 2
+HISTORY_DIM = 4
 
 
 def action_index(src, dst):
@@ -86,7 +87,7 @@ def make_net(arch="mlp"):
     raise ValueError(f"未知网络结构: {arch}")
 
 
-def encode(game, device="cpu"):
+def encode(game, device="cpu", history=False):
     g = torch.zeros(COLS * H * GRID_CLASSES, device=device)
     for c in range(COLS):
         st = game.stacks[c]
@@ -101,7 +102,17 @@ def encode(game, device="cpu"):
         for c in range(COLS):
             meta[4 + c] = game.preview[c] / 7.0
     meta[5 + COLS] = min(game.max_merged, 7) / 7.0
-    return torch.cat([g, meta])
+    parts = [g, meta]
+    if history:
+        empty_history = [
+            game.current_cycle_empty_peak,
+            *game.recent_cycle_empty_peaks,
+        ]
+        parts.append(torch.tensor(
+            [min(2, count) / 2 for count in empty_history],
+            device=device,
+        ))
+    return torch.cat(parts)
 
 
 def legal_mask(game, device="cpu"):

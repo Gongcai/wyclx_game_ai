@@ -67,7 +67,7 @@ class _ChanceNode:
 
 @torch.no_grad()
 def _evaluate(net, game, device, cache, death_penalty):
-    state = encode(game)
+    state = encode(game, history=net.history_features)
     key = state.numpy().tobytes()
     cached = cache.get(key)
     if cached is not None:

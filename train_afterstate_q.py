@@ -89,6 +89,7 @@ def main():
     checkpoint = torch.load(args.init_model, weights_only=True, map_location=args.device)
     net = PolicyValueNet(
         value_outputs=checkpoint.get("value_outputs", 2), afterstate_q=True,
+        history_features=checkpoint.get("history_features", False),
     ).to(args.device)
     missing, unexpected = net.load_state_dict(checkpoint["model"], strict=False)
     allowed_missing = {

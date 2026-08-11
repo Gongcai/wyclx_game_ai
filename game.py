@@ -24,6 +24,8 @@ class Game:
         self.last_drop = None
         self.events = []
         self._afterstate_pending = False
+        self.current_cycle_empty_peak = 0
+        self.recent_cycle_empty_peaks = [0, 0, 0]
         return self.observe()
 
     def observe(self):
@@ -61,6 +63,10 @@ class Game:
         del st[:k]
         self.stacks[dst][:0] = seg
         self._merge_col(dst)
+        self.current_cycle_empty_peak = max(
+            self.current_cycle_empty_peak,
+            sum(not stack for stack in self.stacks),
+        )
         self.moves += 1
         self.last_drop = None
         self._afterstate_pending = not self.dead
@@ -99,6 +105,11 @@ class Game:
             else:
                 values = self.sample_chance() if chance is None else list(chance)
                 self._apply_drops(values)
+            self.recent_cycle_empty_peaks = [
+                self.current_cycle_empty_peak,
+                *self.recent_cycle_empty_peaks[:2],
+            ]
+            self.current_cycle_empty_peak = sum(not stack for stack in self.stacks)
         return True
 
     def _sample(self):

@@ -61,6 +61,7 @@ def main():
         pv_net = PolicyValueNet(
             value_outputs=checkpoint.get("value_outputs", 2),
             afterstate_q=checkpoint.get("afterstate_q", False),
+            history_features=checkpoint.get("history_features", False),
         ).to(args.device)
         pv_net.load_state_dict(checkpoint["model"])
         pv_net.eval()

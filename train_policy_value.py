@@ -10,8 +10,12 @@ import torch
 import torch.nn.functional as F
 
 from agents.policy_value import PolicyValueNet
-from agents.dqn import COLS, GRID_CLASSES, H, N_ACTIONS, action_index, index_action
+from agents.dqn import (
+    COLS, GRID_CLASSES, H, HISTORY_DIM, META_DIM, N_ACTIONS,
+    action_index, index_action,
+)
 from agents.human_strategy import human_structure_from_stacks
+from game import Game
 
 
 PERMUTATIONS = torch.tensor(list(itertools.permutations(range(COLS))), dtype=torch.long)
@@ -65,6 +69,51 @@ def human_structure_scores(states):
         ]
         scores.append(human_structure_from_stacks(stacks).score)
     return torch.tensor(scores, dtype=torch.float32)
+
+
+def decode_stacks(state):
+    grid = state[:COLS * H * GRID_CLASSES].reshape(COLS, H, GRID_CLASSES)
+    return [
+        [int(row.argmax()) + 1 for row in grid[col] if row.sum() > 0]
+        for col in range(COLS)
+    ]
+
+
+def append_empty_history(episode):
+    """从完整动作轨迹重建掉落前也可能短暂出现的空列峰值。"""
+    states = episode["states"].float()
+    base_dim = COLS * H * GRID_CLASSES + META_DIM
+    if states.shape[1] == base_dim + HISTORY_DIM:
+        return states
+    if states.shape[1] != base_dim:
+        raise ValueError(f"未知状态维度: {states.shape[1]}")
+    current_peak = 0
+    recent = [0, 0, 0]
+    enriched = []
+    for step, state in enumerate(states):
+        enriched.append(torch.cat([
+            state,
+            torch.tensor(
+                [min(2, count) / 2 for count in [current_peak, *recent]],
+                dtype=state.dtype,
+            ),
+        ]))
+        phase = int(state[COLS * H * GRID_CLASSES:][:4].argmax())
+        sim = Game()
+        sim.stacks = decode_stacks(state)
+        sim.moves = phase
+        sim.dead = False
+        sim._afterstate_pending = False
+        if not sim.move_afterstate(*index_action(int(episode["actions"][step]))):
+            raise ValueError("轨迹包含无法重放的动作")
+        current_peak = max(current_peak, sum(not stack for stack in sim.stacks))
+        if phase == 3:
+            recent = [current_peak, *recent[:2]]
+            current_peak = (
+                sum(not stack for stack in decode_stacks(states[step + 1]))
+                if step + 1 < len(states) else 0
+            )
+    return torch.stack(enriched)
 
 
 def episode_targets(n9, horizon, gamma, death_horizon, terminal_death=True):
@@ -130,6 +179,7 @@ def main():
     ap.add_argument("--afterstate-q-w", type=float, default=0.0)
     ap.add_argument("--init-model", default=None)
     ap.add_argument("--freeze-base-for-q", action="store_true")
+    ap.add_argument("--history-features", action="store_true", help="加入当前及最近三周期空列峰值")
     ap.add_argument(
         "--policy-head-only", action="store_true",
         help="冻结编码器和价值头，只蒸馏 PUCT 策略头",
@@ -161,7 +211,11 @@ def main():
     val_ids = set(ids[:n_val])
 
     def flatten(selected):
-        states = torch.cat([episode["states"] for episode in selected]).float()
+        states = torch.cat([
+            append_empty_history(episode) if args.history_features
+            else episode["states"].float()
+            for episode in selected
+        ])
         policy_targets = torch.cat([
             episode.get(
                 "policy_targets",
@@ -219,14 +273,29 @@ def main():
     use_afterstate_q = args.afterstate_q_w > 0
     net = PolicyValueNet(
         value_outputs=3, afterstate_q=use_afterstate_q,
+        history_features=args.history_features,
     ).to(args.device)
     if args.init_model:
         checkpoint = torch.load(
             args.init_model, weights_only=True, map_location=args.device,
         )
-        missing, unexpected = net.load_state_dict(
-            checkpoint["model"], strict=False,
-        )
+        init_state = dict(checkpoint["model"])
+        target_state = net.state_dict()
+        for key in (
+            "policy_head.0.weight", "value_head.0.weight",
+            "afterstate_q_head.0.weight",
+        ):
+            if key not in init_state or key not in target_state:
+                continue
+            source = init_state[key]
+            target = target_state[key]
+            if source.shape != target.shape:
+                if source.shape[0] != target.shape[0] or source.shape[1] > target.shape[1]:
+                    raise ValueError(f"无法扩展初始化权重 {key}: {source.shape} -> {target.shape}")
+                expanded = torch.zeros_like(target)
+                expanded[:, :source.shape[1]] = source
+                init_state[key] = expanded
+        missing, unexpected = net.load_state_dict(init_state, strict=False)
         allowed_missing = {
             key for key in net.state_dict() if key.startswith("afterstate_q_head.")
         }
@@ -325,6 +394,7 @@ def main():
             "value_outputs": 3,
             "death_horizon": args.death_horizon,
             "afterstate_q": use_afterstate_q,
+            "history_features": args.history_features,
             "dists": [data.get("dist") for data in datasets],
         },
         out,
@@ -346,6 +416,7 @@ def main():
                 "init_model": args.init_model,
                 "freeze_base_for_q": args.freeze_base_for_q,
                 "policy_head_only": args.policy_head_only,
+                "history_features": args.history_features,
             },
             f,
             indent=2,

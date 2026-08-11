@@ -3,18 +3,22 @@
 import torch
 import torch.nn as nn
 
-from agents.dqn import COLS, GRID_CLASSES, H, N_ACTIONS, index_action
+from agents.dqn import COLS, GRID_CLASSES, H, HISTORY_DIM, N_ACTIONS, index_action
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, hidden=128, value_outputs=2, afterstate_q=False):
+    def __init__(
+        self, hidden=128, value_outputs=2, afterstate_q=False,
+        history_features=False,
+    ):
         super().__init__()
         if value_outputs not in (2, 3):
             raise ValueError("value_outputs 只能是 2 或 3")
         self.value_outputs = value_outputs
         self.afterstate_q = afterstate_q
+        self.history_features = history_features
         col_dim = H * GRID_CLASSES + 1
-        global_dim = 6
+        global_dim = 6 + (HISTORY_DIM if history_features else 0)
         self.col_encoder = nn.Sequential(
             nn.Linear(col_dim, hidden),
             nn.ReLU(),

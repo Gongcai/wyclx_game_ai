@@ -40,6 +40,7 @@ def main():
     net = PolicyValueNet(
         value_outputs=checkpoint.get("value_outputs", 2),
         afterstate_q=checkpoint.get("afterstate_q", False),
+        history_features=checkpoint.get("history_features", False),
     ).to(args.device)
     net.load_state_dict(checkpoint["model"])
     net.eval()
@@ -58,7 +59,7 @@ def main():
         q_masks = []
         n9_events = []
         while not game.dead and game.moves < args.max_moves:
-            states.append(encode(game))
+            states.append(encode(game, history=net.history_features))
             search_result = puct_search(
                 game, net, args.device, args.simulations, args.depth,
                 c_puct=args.c_puct,

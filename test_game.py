@@ -2,6 +2,7 @@ import random
 
 import torch
 
+from agents.dqn import HISTORY_DIM, META_DIM, encode
 from agents.policy_value import PolicyValueNet
 from agents.puct import puct_search
 from agents.human_strategy import human_structure
@@ -159,6 +160,27 @@ def t_afterstate_matches_move_and_rng():
         assert direct.events == split.events
         assert direct.score == split.score
         assert direct.dead == split.dead
+        assert direct.current_cycle_empty_peak == split.current_cycle_empty_peak
+        assert direct.recent_cycle_empty_peaks == split.recent_cycle_empty_peaks
+
+
+def t_empty_cycle_history_includes_pre_drop_peak():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    g.move(0, 1)
+    g.move(2, 1)
+    g.move(3, 1)
+    assert g.current_cycle_empty_peak == 3
+    g.move(4, 1)
+    assert g.recent_cycle_empty_peaks == [4, 0, 0]
+    assert len(encode(g, history=True)) == len(encode(g)) + HISTORY_DIM
+    assert len(encode(g)) == 6 * 7 * 9 + META_DIM
+
+
+def t_policy_value_accepts_empty_history():
+    g = Game(rng=random.Random(0))
+    net = PolicyValueNet(hidden=16, history_features=True)
+    outputs = net(encode(g, history=True).unsqueeze(0))
+    assert outputs[0].shape == (1, 30)
 
 
 def t_puct_root_min_visits_covers_legal_actions():
@@ -225,6 +247,8 @@ def run_all():
     t_afterstate_defers_preview_sampling()
     t_afterstate_applies_known_preview_deterministically()
     t_afterstate_matches_move_and_rng()
+    t_empty_cycle_history_includes_pre_drop_peak()
+    t_policy_value_accepts_empty_history()
     t_puct_root_min_visits_covers_legal_actions()
     t_puct_depth_cutoff_uses_leaf_value()
     t_human_structure_prefers_ordered_stacks()
