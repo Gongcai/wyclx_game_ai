@@ -4,6 +4,7 @@ import torch
 
 from agents.policy_value import PolicyValueNet
 from agents.puct import puct_search
+from agents.human_strategy import human_structure
 from game import Game
 
 
@@ -182,6 +183,31 @@ def t_puct_root_min_visits_covers_legal_actions():
     assert q_targets.shape == policy.shape == q_mask.shape
 
 
+def t_puct_depth_cutoff_uses_leaf_value():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    net = PolicyValueNet(hidden=16)
+    for parameter in net.parameters():
+        torch.nn.init.zeros_(parameter)
+    net.value_head[-1].bias.data[0] = 2.0
+    _action, _policy, q_targets, q_mask = puct_search(
+        g, net, simulations=2, depth=1, gamma=1.0,
+        return_policy=True, return_q=True,
+    )
+    assert torch.isclose(q_targets[q_mask.bool()].max(), torch.tensor(2.0))
+
+
+def t_human_structure_prefers_ordered_stacks():
+    ordered = Game(rng=random.Random(0))
+    ordered.stacks = [[1, 2, 3, 7], [2, 3, 6], [], [], [], []]
+    disordered = Game(rng=random.Random(0))
+    disordered.stacks = [[7, 3, 2, 1], [6, 3, 2], [], [], [], []]
+    ordered_metrics = human_structure(ordered)
+    disordered_metrics = human_structure(disordered)
+    assert ordered_metrics.inversions == 0
+    assert disordered_metrics.inversions > 0
+    assert ordered_metrics.score > disordered_metrics.score
+
+
 def run_all():
     t_basic_merge()
     t_merge_run_of_4()
@@ -200,6 +226,8 @@ def run_all():
     t_afterstate_applies_known_preview_deterministically()
     t_afterstate_matches_move_and_rng()
     t_puct_root_min_visits_covers_legal_actions()
+    t_puct_depth_cutoff_uses_leaf_value()
+    t_human_structure_prefers_ordered_stacks()
     print("all tests passed")
 
 

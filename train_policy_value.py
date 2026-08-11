@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from agents.policy_value import PolicyValueNet
 from agents.dqn import COLS, GRID_CLASSES, H, N_ACTIONS, action_index, index_action
+from agents.human_strategy import human_structure_from_stacks
 
 
 PERMUTATIONS = torch.tensor(list(itertools.permutations(range(COLS))), dtype=torch.long)
@@ -50,6 +51,20 @@ def ended_by_death(episode):
         return bool(episode["dones"][-1])
     # 旧版 PUCT 长局未保存 dead；这些轨迹均运行至死亡。
     return True
+
+
+def human_structure_scores(states):
+    grid = states[:, :COLS * H * GRID_CLASSES].reshape(
+        -1, COLS, H, GRID_CLASSES,
+    )
+    scores = []
+    for state_grid in grid:
+        stacks = [
+            [int(row.argmax()) + 1 for row in state_grid[col] if row.sum() > 0]
+            for col in range(COLS)
+        ]
+        scores.append(human_structure_from_stacks(stacks).score)
+    return torch.tensor(scores, dtype=torch.float32)
 
 
 def episode_targets(n9, horizon, gamma, death_horizon, terminal_death=True):
@@ -122,6 +137,10 @@ def main():
     ap.add_argument("--death-horizon", type=int, default=16)
     ap.add_argument("--mature-policy-weight", type=float, default=1.0, help="首个9之后状态的额外策略权重")
     ap.add_argument("--high-tile-policy-weight", type=float, default=0.0, help="棋盘含7/8状态的额外策略权重")
+    ap.add_argument(
+        "--human-structure-policy-weight", type=float, default=0.0,
+        help="按人类长局结构分连续提高策略目标权重",
+    )
     ap.add_argument("--elite-score-threshold", type=int, default=0, help="整局9数量达到该值视为精英轨迹")
     ap.add_argument("--elite-policy-weight", type=float, default=0.0, help="精英轨迹的额外策略权重")
     ap.add_argument("--puct-policy-weight", type=float, default=1.0, help="PUCT 软策略目标的权重倍率")
@@ -187,6 +206,7 @@ def main():
             1.0
             + args.mature_policy_weight * mature
             + args.high_tile_policy_weight * high_tile
+            + args.human_structure_policy_weight * human_structure_scores(states)
             + args.elite_policy_weight * elite
         )
         return (
@@ -317,6 +337,7 @@ def main():
                 "mature_policy_weight": args.mature_policy_weight,
                 "puct_policy_weight": args.puct_policy_weight,
                 "high_tile_policy_weight": args.high_tile_policy_weight,
+                "human_structure_policy_weight": args.human_structure_policy_weight,
                 "elite_score_threshold": args.elite_score_threshold,
                 "elite_policy_weight": args.elite_policy_weight,
                 "death_weight": args.death_w,

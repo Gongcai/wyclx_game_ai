@@ -175,6 +175,11 @@ def puct_search(
             reward = float(sum(event >= 9 for event in state.events))
             path.append((node, edge, reward))
             node = child
+        else:
+            if not state.dead:
+                _priors, leaf_value, _afterstate_q = _evaluate(
+                    net, state, device, cache, death_penalty,
+                )
         value = leaf_value
         for visited, edge, reward in reversed(path):
             value = reward + gamma * value
