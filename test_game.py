@@ -1,5 +1,9 @@
 import random
 
+import torch
+
+from agents.policy_value import PolicyValueNet
+from agents.puct import puct_search
 from game import Game
 
 
@@ -156,6 +160,28 @@ def t_afterstate_matches_move_and_rng():
         assert direct.dead == split.dead
 
 
+def t_puct_root_min_visits_covers_legal_actions():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    net = PolicyValueNet(hidden=16)
+    for parameter in net.parameters():
+        torch.nn.init.zeros_(parameter)
+    action, policy, q_targets, q_mask = puct_search(
+        g,
+        net,
+        simulations=61,
+        depth=1,
+        chance_samples=1,
+        root_min_visits=2,
+        return_policy=True,
+        return_q=True,
+    )
+    assert action in g.legal_moves()
+    assert torch.isclose(policy.sum(), torch.tensor(1.0))
+    assert int((policy > 0).sum()) == len(g.legal_moves())
+    assert int(q_mask.sum()) == len(g.legal_moves())
+    assert q_targets.shape == policy.shape == q_mask.shape
+
+
 def run_all():
     t_basic_merge()
     t_merge_run_of_4()
@@ -173,6 +199,7 @@ def run_all():
     t_afterstate_defers_preview_sampling()
     t_afterstate_applies_known_preview_deterministically()
     t_afterstate_matches_move_and_rng()
+    t_puct_root_min_visits_covers_legal_actions()
     print("all tests passed")
 
 

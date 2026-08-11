@@ -1,4 +1,4 @@
-"""使用 Policy+Value 网络的随机 root-sampling PUCT。"""
+"""使用 Policy+Value 网络和显式 chance node 的随机环境 PUCT。"""
 
 import copy
 import math
@@ -10,8 +10,9 @@ from agents.dqn import N_ACTIONS, action_index, encode, index_action, legal_mask
 
 
 class _Edge:
-    def __init__(self, prior):
+    def __init__(self, prior, afterstate_value=0.0):
         self.prior = prior
+        self.afterstate_value = afterstate_value
         self.visits = 0
         self.value = 0.0
         self.child = _Node()
@@ -71,13 +72,16 @@ def _evaluate(net, game, device, cache, death_penalty):
     cached = cache.get(key)
     if cached is not None:
         return cached
-    policy, future_n9, _distance, death_risk = net(state.to(device).unsqueeze(0))
+    policy, future_n9, _distance, death_risk, afterstate_q = net(
+        state.to(device).unsqueeze(0)
+    )
     mask = legal_mask(game, device).bool()
     policy = policy[0].masked_fill(~mask, float("-inf"))
     priors = torch.softmax(policy, dim=0).cpu()
     result = (
         priors,
         max(0.0, float(future_n9[0])) - death_penalty * float(death_risk[0]),
+        afterstate_q[0].cpu(),
     )
     cache[key] = result
     return result
@@ -86,7 +90,8 @@ def _evaluate(net, game, device, cache, death_penalty):
 def puct_search(
     game, net, device="cpu", simulations=64, depth=24,
     c_puct=1.5, gamma=0.99, death_penalty=0.0, chance_samples=0,
-    chance_widening=0.0, return_policy=False,
+    chance_widening=0.0, root_min_visits=0, return_policy=False,
+    return_q=False,
 ):
     legal = game.legal_moves()
     if not legal:
@@ -105,26 +110,40 @@ def puct_search(
         node = root
         path = []
         leaf_value = 0.0
+        updated_leaf_edge = False
         for _step in range(max(1, depth)):
             if state.dead:
                 leaf_value = -0.5
                 break
             if node.edges is None:
-                priors, leaf_value = _evaluate(
+                priors, leaf_value, afterstate_q = _evaluate(
                     net, state, device, cache, death_penalty,
                 )
                 node.edges = {
-                    action_index(s, d): _Edge(float(priors[action_index(s, d)]))
+                    action_index(s, d): _Edge(
+                        float(priors[action_index(s, d)]),
+                        float(afterstate_q[action_index(s, d)]),
+                    )
                     for s, d in state.legal_moves()
                 }
                 break
-            sqrt_n = math.sqrt(max(1, node.visits))
-            action_id, edge = max(
-                node.edges.items(),
-                key=lambda item: (
-                    item[1].value / item[1].visits if item[1].visits else 0.0
-                ) + c_puct * item[1].prior * sqrt_n / (1 + item[1].visits),
+            underexplored = (
+                [item for item in node.edges.items() if item[1].visits < root_min_visits]
+                if node is root and root_min_visits > 0 else []
             )
+            if underexplored:
+                action_id, edge = max(
+                    underexplored,
+                    key=lambda item: (-item[1].visits, item[1].prior),
+                )
+            else:
+                sqrt_n = math.sqrt(max(1, node.visits))
+                action_id, edge = max(
+                    node.edges.items(),
+                    key=lambda item: (
+                        item[1].value / item[1].visits if item[1].visits else 0.0
+                    ) + c_puct * item[1].prior * sqrt_n / (1 + item[1].visits),
+                )
             action = index_action(action_id)
             if chance_samples > 0:
                 if not state.move_afterstate(*action):
@@ -133,6 +152,13 @@ def puct_search(
                 if state.chance_required():
                     if edge.chance is None:
                         edge.chance = _ChanceNode()
+                        if net.afterstate_q:
+                            leaf_value = max(0.0, edge.afterstate_value)
+                            edge.visits += 1
+                            edge.value += leaf_value
+                            node.visits += 1
+                            updated_leaf_edge = True
+                            break
                     outcome = edge.chance.sample(
                         state, rng, chance_samples, chance_widening,
                     )
@@ -155,7 +181,7 @@ def puct_search(
             edge.visits += 1
             edge.value += value
             visited.visits += 1
-        if not path:
+        if not path and not updated_leaf_edge:
             root.visits += 1
 
     if root.edges is None:
@@ -164,6 +190,8 @@ def puct_search(
             return action
         policy = torch.zeros(N_ACTIONS)
         policy[action_index(*action)] = 1.0
+        if return_q:
+            return action, policy, torch.zeros(N_ACTIONS), policy.clone()
         return action, policy
     action_id = max(root.edges.items(), key=lambda item: item[1].visits)[0]
     action = index_action(action_id)
@@ -174,4 +202,12 @@ def puct_search(
         visits[child_action] = edge.visits
     if visits.sum() == 0:
         visits[action_id] = 1.0
-    return action, visits / visits.sum()
+    if not return_q:
+        return action, visits / visits.sum()
+    q_targets = torch.zeros(N_ACTIONS)
+    q_mask = torch.zeros(N_ACTIONS)
+    for child_action, edge in root.edges.items():
+        if edge.visits > 0:
+            q_targets[child_action] = edge.value / edge.visits
+            q_mask[child_action] = 1.0
+    return action, visits / visits.sum(), q_targets, q_mask

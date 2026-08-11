@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--death-penalty", type=float, default=0.0)
     ap.add_argument("--chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
     ap.add_argument("--chance-widening", type=float, default=0.0, help="chance node 渐进扩展指数，建议 0.5")
+    ap.add_argument("--save-q-targets", action="store_true", help="保存根搜索的全动作 Q reanalyse 目标")
+    ap.add_argument("--root-min-visits", type=int, default=0, help="reanalyse 时强制根动作最少访问次数")
     ap.add_argument("--gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--seed", type=int, default=20000)
     ap.add_argument("--out", default=None)
@@ -34,7 +36,10 @@ def main():
     args = ap.parse_args()
 
     checkpoint = torch.load(args.model, weights_only=True, map_location=args.device)
-    net = PolicyValueNet(value_outputs=checkpoint.get("value_outputs", 2)).to(args.device)
+    net = PolicyValueNet(
+        value_outputs=checkpoint.get("value_outputs", 2),
+        afterstate_q=checkpoint.get("afterstate_q", False),
+    ).to(args.device)
     net.load_state_dict(checkpoint["model"])
     net.eval()
     gamma = args.gamma if args.gamma is not None else checkpoint.get("gamma", 0.99)
@@ -48,17 +53,27 @@ def main():
         states = []
         actions = []
         policy_targets = []
+        q_targets = []
+        q_masks = []
         n9_events = []
         while not game.dead and game.moves < args.max_moves:
             states.append(encode(game))
-            action, policy = puct_search(
+            search_result = puct_search(
                 game, net, args.device, args.simulations, args.depth,
                 gamma=gamma,
                 death_penalty=args.death_penalty,
                 chance_samples=args.chance_samples,
                 chance_widening=args.chance_widening,
+                root_min_visits=args.root_min_visits,
                 return_policy=True,
+                return_q=args.save_q_targets,
             )
+            if args.save_q_targets:
+                action, policy, root_q, root_q_mask = search_result
+                q_targets.append(root_q)
+                q_masks.append(root_q_mask)
+            else:
+                action, policy = search_result
             if game.moves < args.temperature_moves and args.temperature > 0:
                 probs = policy.pow(1.0 / args.temperature)
                 if probs.sum() > 0:
@@ -71,21 +86,23 @@ def main():
             if not game.move(*action):
                 break
             n9_events.append(sum(event >= 9 for event in game.events))
-        episodes.append(
-            {
-                "seed": seed,
-                "score": game.score,
-                "moves": game.moves,
-                "dead": game.dead,
-                "states": torch.stack(states),
-                "actions": torch.tensor(actions, dtype=torch.long),
-                "policy_targets": torch.stack(policy_targets),
-                "n9": torch.tensor(n9_events, dtype=torch.float32),
-                "n9_steps": [
-                    i + 1 for i, count in enumerate(n9_events) for _ in range(count)
-                ],
-            }
-        )
+        episode = {
+            "seed": seed,
+            "score": game.score,
+            "moves": game.moves,
+            "dead": game.dead,
+            "states": torch.stack(states),
+            "actions": torch.tensor(actions, dtype=torch.long),
+            "policy_targets": torch.stack(policy_targets),
+            "n9": torch.tensor(n9_events, dtype=torch.float32),
+            "n9_steps": [
+                i + 1 for i, count in enumerate(n9_events) for _ in range(count)
+            ],
+        }
+        if args.save_q_targets:
+            episode["afterstate_q_targets"] = torch.stack(q_targets)
+            episode["afterstate_q_masks"] = torch.stack(q_masks)
+        episodes.append(episode)
         total_n9 = sum(len(episode["n9_steps"]) for episode in episodes)
         print(
             f"[{episode_id + 1:>4}/{args.episodes}] 本局9={game.score // 9} "
@@ -106,6 +123,8 @@ def main():
             "death_penalty": args.death_penalty,
             "chance_samples": args.chance_samples,
             "chance_widening": args.chance_widening,
+            "has_q_targets": args.save_q_targets,
+            "root_min_visits": args.root_min_visits,
             "gamma": gamma,
             "episodes": episodes,
         },

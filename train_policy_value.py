@@ -24,7 +24,7 @@ for permutation in PERMUTATIONS.tolist():
 ACTION_MAPS = torch.tensor(ACTION_MAPS, dtype=torch.long)
 
 
-def augment_batch(states, policy_targets, generator):
+def augment_batch(states, policy_targets, actions, generator):
     batch = len(states)
     ids = torch.randint(len(PERMUTATIONS), (batch,), generator=generator)
     permutations = PERMUTATIONS[ids]
@@ -37,7 +37,10 @@ def augment_batch(states, policy_targets, generator):
     out[:, grid_size + 4:grid_size + 4 + COLS] = torch.gather(preview, 1, permutations)
     out_policy = torch.zeros_like(policy_targets)
     out_policy.scatter_(1, ACTION_MAPS[ids], policy_targets)
-    return out, out_policy
+    out_actions = torch.gather(
+        ACTION_MAPS[ids], 1, actions.long().unsqueeze(1),
+    ).squeeze(1)
+    return out, out_policy, out_actions
 
 
 def ended_by_death(episode):
@@ -67,23 +70,33 @@ def episode_targets(n9, horizon, gamma, death_horizon, terminal_death=True):
 
 
 @torch.no_grad()
-def metrics(net, states, policy_targets, future, distance, death, device, batch):
+def metrics(
+    net, states, policy_targets, actions, future, distance, death,
+    device, batch, afterstate_q,
+):
     correct = 0
     policy_loss = 0.0
-    value_error = distance_error = death_error = 0.0
+    value_error = distance_error = death_error = q_error = 0.0
     for start in range(0, len(policy_targets), batch):
         end = start + batch
-        policy, pred_value, pred_distance, pred_death = net(states[start:end].to(device))
+        policy, pred_value, pred_distance, pred_death, pred_q = net(
+            states[start:end].to(device)
+        )
         targets = policy_targets[start:end].to(device)
         correct += int((policy.argmax(1).cpu() == policy_targets[start:end].argmax(1)).sum())
         policy_loss += float((-(targets * F.log_softmax(policy, dim=1)).sum(1)).sum())
         value_error += float((pred_value.cpu() - future[start:end]).abs().sum())
         distance_error += float((pred_distance.cpu() - distance[start:end]).abs().sum())
         death_error += float((pred_death.cpu() - death[start:end]).abs().sum())
+        if afterstate_q:
+            chosen_q = pred_q.gather(
+                1, actions[start:end].to(device).long().unsqueeze(1),
+            ).squeeze(1)
+            q_error += float((chosen_q.cpu() - future[start:end]).abs().sum())
     n = len(policy_targets)
     return (
         correct / n, policy_loss / n, value_error / n,
-        distance_error / n, death_error / n,
+        distance_error / n, death_error / n, q_error / n,
     )
 
 
@@ -99,6 +112,9 @@ def main():
     ap.add_argument("--value-w", type=float, default=1.0)
     ap.add_argument("--distance-w", type=float, default=1.0)
     ap.add_argument("--death-w", type=float, default=0.5)
+    ap.add_argument("--afterstate-q-w", type=float, default=0.0)
+    ap.add_argument("--init-model", default=None)
+    ap.add_argument("--freeze-base-for-q", action="store_true")
     ap.add_argument("--death-horizon", type=int, default=16)
     ap.add_argument("--mature-policy-weight", type=float, default=1.0, help="首个9之后状态的额外策略权重")
     ap.add_argument("--high-tile-policy-weight", type=float, default=0.0, help="棋盘含7/8状态的额外策略权重")
@@ -130,6 +146,7 @@ def main():
             )
             for episode in selected
         ]).float()
+        actions = torch.cat([episode["actions"] for episode in selected]).long()
         targets = [
             episode_targets(
                 episode["n9"], args.horizon, args.gamma, args.death_horizon,
@@ -168,12 +185,40 @@ def main():
             + args.high_tile_policy_weight * high_tile
             + args.elite_policy_weight * elite
         )
-        return states, policy_targets, future, distance, death, policy_weight
+        return (
+            states, policy_targets, actions, future, distance, death,
+            policy_weight,
+        )
 
     train = flatten([episode for i, episode in enumerate(episodes) if i not in val_ids])
     val = flatten([episode for i, episode in enumerate(episodes) if i in val_ids])
-    net = PolicyValueNet(value_outputs=3).to(args.device)
-    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+    use_afterstate_q = args.afterstate_q_w > 0
+    net = PolicyValueNet(
+        value_outputs=3, afterstate_q=use_afterstate_q,
+    ).to(args.device)
+    if args.init_model:
+        checkpoint = torch.load(
+            args.init_model, weights_only=True, map_location=args.device,
+        )
+        missing, unexpected = net.load_state_dict(
+            checkpoint["model"], strict=False,
+        )
+        allowed_missing = {
+            key for key in net.state_dict() if key.startswith("afterstate_q_head.")
+        }
+        if set(missing) != allowed_missing or unexpected:
+            raise ValueError(
+                f"初始化模型结构不兼容: missing={missing}, unexpected={unexpected}"
+            )
+    if args.freeze_base_for_q:
+        if not use_afterstate_q or not args.init_model:
+            raise ValueError("--freeze-base-for-q 需要 Q 头和 --init-model")
+        for name, parameter in net.named_parameters():
+            parameter.requires_grad = name.startswith("afterstate_q_head.")
+    opt = torch.optim.Adam(
+        [parameter for parameter in net.parameters() if parameter.requires_grad],
+        lr=args.lr,
+    )
     generator = torch.Generator().manual_seed(args.seed)
     best = None
     best_loss = float("inf")
@@ -183,39 +228,58 @@ def main():
         order = torch.randperm(len(train[1]), generator=generator)
         for start in range(0, len(order), args.batch):
             idx = order[start:start + args.batch]
-            states, policy_targets = augment_batch(train[0][idx], train[1][idx], generator)
-            policy, pred_value, pred_distance, pred_death = net(states.to(args.device))
+            states, policy_targets, actions = augment_batch(
+                train[0][idx], train[1][idx], train[2][idx], generator,
+            )
+            policy, pred_value, pred_distance, pred_death, pred_q = net(
+                states.to(args.device)
+            )
             targets = policy_targets.to(args.device)
             per_sample_policy = -(targets * F.log_softmax(policy, dim=1)).sum(1)
-            policy_weight = train[5][idx].to(args.device)
+            policy_weight = train[6][idx].to(args.device)
             policy_loss = (per_sample_policy * policy_weight).sum() / policy_weight.sum()
-            value_loss = F.smooth_l1_loss(pred_value, train[2][idx].to(args.device))
-            distance_loss = F.smooth_l1_loss(pred_distance, train[3][idx].to(args.device))
+            value_loss = F.smooth_l1_loss(pred_value, train[3][idx].to(args.device))
+            distance_loss = F.smooth_l1_loss(pred_distance, train[4][idx].to(args.device))
             death_loss = F.binary_cross_entropy(
-                pred_death, train[4][idx].to(args.device),
+                pred_death, train[5][idx].to(args.device),
             )
+            if use_afterstate_q:
+                chosen_q = pred_q.gather(
+                    1, actions.to(args.device).unsqueeze(1),
+                ).squeeze(1)
+                q_loss = F.smooth_l1_loss(
+                    chosen_q, train[3][idx].to(args.device),
+                )
+            else:
+                q_loss = torch.zeros((), device=args.device)
             loss = (
                 policy_loss
                 + args.value_w * value_loss
                 + args.distance_w * distance_loss
                 + args.death_w * death_loss
+                + args.afterstate_q_w * q_loss
             )
             opt.zero_grad()
             loss.backward()
             opt.step()
         net.eval()
         stats = metrics(
-            net, val[0], val[1], val[2], val[3], val[4],
-            args.device, args.batch,
+            net, val[0], val[1], val[2], val[3], val[4], val[5],
+            args.device, args.batch, use_afterstate_q,
         )
-        val_loss = 0.2 * stats[1] + stats[2] + stats[3] + args.death_w * stats[4]
+        val_loss = (
+            0.2 * stats[1] + stats[2] + stats[3]
+            + args.death_w * stats[4]
+            + args.afterstate_q_w * stats[5]
+        )
         if val_loss < best_loss:
             best_loss = val_loss
             best = {key: value.detach().cpu().clone() for key, value in net.state_dict().items()}
         print(
             f"[{epoch:>3}/{args.epochs}] val_policy={stats[0]:.2%} "
             f"policy_ce={stats[1]:.3f} value_mae={stats[2]:.3f} "
-            f"next9_mae={stats[3]:.3f} death_mae={stats[4]:.3f}",
+            f"next9_mae={stats[3]:.3f} death_mae={stats[4]:.3f} "
+            f"after_q_mae={stats[5]:.3f}",
             flush=True,
         )
 
@@ -228,6 +292,7 @@ def main():
             "gamma": args.gamma,
             "value_outputs": 3,
             "death_horizon": args.death_horizon,
+            "afterstate_q": use_afterstate_q,
             "dists": [data.get("dist") for data in datasets],
         },
         out,
@@ -244,6 +309,9 @@ def main():
                 "elite_policy_weight": args.elite_policy_weight,
                 "death_weight": args.death_w,
                 "death_horizon": args.death_horizon,
+                "afterstate_q_weight": args.afterstate_q_w,
+                "init_model": args.init_model,
+                "freeze_base_for_q": args.freeze_base_for_q,
             },
             f,
             indent=2,

@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--puct-death-penalty", type=float, default=0.0)
     ap.add_argument("--puct-chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
     ap.add_argument("--puct-chance-widening", type=float, default=0.0)
+    ap.add_argument("--puct-root-min-visits", type=int, default=0)
     ap.add_argument("--puct-gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--json-out", default=None, help="同时保存机器可读结果")
@@ -56,7 +57,10 @@ def main():
         agent.load(args.model)
     elif args.policy == "puct":
         checkpoint = torch.load(args.pv_model, weights_only=True, map_location=args.device)
-        pv_net = PolicyValueNet(value_outputs=checkpoint.get("value_outputs", 2)).to(args.device)
+        pv_net = PolicyValueNet(
+            value_outputs=checkpoint.get("value_outputs", 2),
+            afterstate_q=checkpoint.get("afterstate_q", False),
+        ).to(args.device)
         pv_net.load_state_dict(checkpoint["model"])
         pv_net.eval()
         puct_gamma = args.puct_gamma if args.puct_gamma is not None else checkpoint.get("gamma", 0.99)
@@ -89,6 +93,7 @@ def main():
                 death_penalty=args.puct_death_penalty,
                 chance_samples=args.puct_chance_samples,
                 chance_widening=args.puct_chance_widening,
+                root_min_visits=args.puct_root_min_visits,
             )
         elif args.policy == "greedy":
             action = greedy_policy(game)
