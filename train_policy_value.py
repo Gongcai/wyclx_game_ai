@@ -1,6 +1,7 @@
 """从长局 beam 示范联合训练等变策略与价值网络。"""
 
 import argparse
+import itertools
 import json
 import os
 import random
@@ -9,7 +10,34 @@ import torch
 import torch.nn.functional as F
 
 from agents.policy_value import PolicyValueNet
-from train_bc import augment_columns
+from agents.dqn import COLS, GRID_CLASSES, H, N_ACTIONS, action_index, index_action
+
+
+PERMUTATIONS = torch.tensor(list(itertools.permutations(range(COLS))), dtype=torch.long)
+ACTION_MAPS = []
+for permutation in PERMUTATIONS.tolist():
+    inverse = [permutation.index(old) for old in range(COLS)]
+    ACTION_MAPS.append([
+        action_index(inverse[src], inverse[dst])
+        for src, dst in (index_action(i) for i in range(N_ACTIONS))
+    ])
+ACTION_MAPS = torch.tensor(ACTION_MAPS, dtype=torch.long)
+
+
+def augment_batch(states, policy_targets, generator):
+    batch = len(states)
+    ids = torch.randint(len(PERMUTATIONS), (batch,), generator=generator)
+    permutations = PERMUTATIONS[ids]
+    grid_size = COLS * H * GRID_CLASSES
+    grid = states[:, :grid_size].reshape(batch, COLS, H, GRID_CLASSES)
+    gather_grid = permutations[:, :, None, None].expand(-1, -1, H, GRID_CLASSES)
+    out = states.clone()
+    out[:, :grid_size] = torch.gather(grid, 1, gather_grid).reshape(batch, -1)
+    preview = states[:, grid_size + 4:grid_size + 4 + COLS]
+    out[:, grid_size + 4:grid_size + 4 + COLS] = torch.gather(preview, 1, permutations)
+    out_policy = torch.zeros_like(policy_targets)
+    out_policy.scatter_(1, ACTION_MAPS[ids], policy_targets)
+    return out, out_policy
 
 
 def episode_targets(n9, horizon, gamma):
@@ -27,22 +55,25 @@ def episode_targets(n9, horizon, gamma):
 
 
 @torch.no_grad()
-def metrics(net, states, actions, future, distance, device, batch):
+def metrics(net, states, policy_targets, future, distance, device, batch):
     correct = 0
+    policy_loss = 0.0
     value_error = distance_error = 0.0
-    for start in range(0, len(actions), batch):
+    for start in range(0, len(policy_targets), batch):
         end = start + batch
         policy, pred_value, pred_distance = net(states[start:end].to(device))
-        correct += int((policy.argmax(1).cpu() == actions[start:end]).sum())
+        targets = policy_targets[start:end].to(device)
+        correct += int((policy.argmax(1).cpu() == policy_targets[start:end].argmax(1)).sum())
+        policy_loss += float((-(targets * F.log_softmax(policy, dim=1)).sum(1)).sum())
         value_error += float((pred_value.cpu() - future[start:end]).abs().sum())
         distance_error += float((pred_distance.cpu() - distance[start:end]).abs().sum())
-    n = len(actions)
-    return correct / n, value_error / n, distance_error / n
+    n = len(policy_targets)
+    return correct / n, policy_loss / n, value_error / n, distance_error / n
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--demos", required=True)
+    ap.add_argument("--demos", nargs="+", required=True)
     ap.add_argument("--out", default=None)
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch", type=int, default=256)
@@ -51,6 +82,8 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--value-w", type=float, default=1.0)
     ap.add_argument("--distance-w", type=float, default=1.0)
+    ap.add_argument("--mature-policy-weight", type=float, default=1.0, help="首个9之后状态的额外策略权重")
+    ap.add_argument("--puct-policy-weight", type=float, default=1.0, help="PUCT 软策略目标的权重倍率")
     ap.add_argument("--val-ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -58,8 +91,8 @@ def main():
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    data = torch.load(args.demos, weights_only=True, map_location="cpu")
-    episodes = data.get("episodes", [])
+    datasets = [torch.load(path, weights_only=True, map_location="cpu") for path in args.demos]
+    episodes = [episode for data in datasets for episode in data.get("episodes", [])]
     if not episodes or "n9" not in episodes[0]:
         raise ValueError("需要新版长局示范（每局必须包含 n9）")
     ids = list(range(len(episodes)))
@@ -69,11 +102,29 @@ def main():
 
     def flatten(selected):
         states = torch.cat([episode["states"] for episode in selected]).float()
-        actions = torch.cat([episode["actions"] for episode in selected]).long()
+        policy_targets = torch.cat([
+            episode.get(
+                "policy_targets",
+                F.one_hot(episode["actions"].long(), N_ACTIONS).float(),
+            )
+            for episode in selected
+        ]).float()
         targets = [episode_targets(episode["n9"], args.horizon, args.gamma) for episode in selected]
         future = torch.cat([target[0] for target in targets])
         distance = torch.cat([target[1] for target in targets])
-        return states, actions, future, distance
+        mature = torch.cat([
+            (torch.cumsum(episode["n9"], dim=0) - episode["n9"] > 0).float()
+            for episode in selected
+        ])
+        source_weight = torch.cat([
+            torch.full(
+                (len(episode["n9"]),),
+                args.puct_policy_weight if "policy_targets" in episode else 1.0,
+            )
+            for episode in selected
+        ])
+        policy_weight = source_weight * (1.0 + args.mature_policy_weight * mature)
+        return states, policy_targets, future, distance, policy_weight
 
     train = flatten([episode for i, episode in enumerate(episodes) if i not in val_ids])
     val = flatten([episode for i, episode in enumerate(episodes) if i in val_ids])
@@ -88,9 +139,12 @@ def main():
         order = torch.randperm(len(train[1]), generator=generator)
         for start in range(0, len(order), args.batch):
             idx = order[start:start + args.batch]
-            states, actions = augment_columns(train[0][idx], train[1][idx], generator)
+            states, policy_targets = augment_batch(train[0][idx], train[1][idx], generator)
             policy, pred_value, pred_distance = net(states.to(args.device))
-            policy_loss = F.cross_entropy(policy, actions.to(args.device))
+            targets = policy_targets.to(args.device)
+            per_sample_policy = -(targets * F.log_softmax(policy, dim=1)).sum(1)
+            policy_weight = train[4][idx].to(args.device)
+            policy_loss = (per_sample_policy * policy_weight).sum() / policy_weight.sum()
             value_loss = F.smooth_l1_loss(pred_value, train[2][idx].to(args.device))
             distance_loss = F.smooth_l1_loss(pred_distance, train[3][idx].to(args.device))
             loss = policy_loss + args.value_w * value_loss + args.distance_w * distance_loss
@@ -98,30 +152,40 @@ def main():
             loss.backward()
             opt.step()
         net.eval()
-        stats = metrics(net, *val, args.device, args.batch)
-        val_loss = stats[1] + stats[2]
+        stats = metrics(net, val[0], val[1], val[2], val[3], args.device, args.batch)
+        val_loss = 0.2 * stats[1] + stats[2] + stats[3]
         if val_loss < best_loss:
             best_loss = val_loss
             best = {key: value.detach().cpu().clone() for key, value in net.state_dict().items()}
         print(
             f"[{epoch:>3}/{args.epochs}] val_policy={stats[0]:.2%} "
-            f"value_mae={stats[1]:.3f} next9_mae={stats[2]:.3f}",
+            f"policy_ce={stats[1]:.3f} value_mae={stats[2]:.3f} "
+            f"next9_mae={stats[3]:.3f}",
             flush=True,
         )
 
-    out = args.out or os.path.join(os.path.dirname(args.demos), "policy-value.pt")
+    out = args.out or os.path.join(os.path.dirname(args.demos[0]), "policy-value.pt")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     torch.save(
         {
             "model": best,
             "horizon": args.horizon,
             "gamma": args.gamma,
-            "dist": data.get("dist"),
+            "dists": [data.get("dist") for data in datasets],
         },
         out,
     )
     with open(os.path.splitext(out)[0] + ".json", "w") as f:
-        json.dump({"best_value_distance_mae": best_loss, "demos": args.demos}, f, indent=2)
+        json.dump(
+            {
+                "best_value_distance_mae": best_loss,
+                "demos": args.demos,
+                "mature_policy_weight": args.mature_policy_weight,
+                "puct_policy_weight": args.puct_policy_weight,
+            },
+            f,
+            indent=2,
+        )
     print(f"已保存 {out}")
 
 

@@ -6,7 +6,7 @@ import random
 
 import torch
 
-from agents.dqn import action_index, encode, index_action, legal_mask
+from agents.dqn import N_ACTIONS, action_index, encode, index_action, legal_mask
 
 
 class _Edge:
@@ -39,7 +39,10 @@ def _evaluate(net, game, device, cache):
     return result
 
 
-def puct_search(game, net, device="cpu", simulations=64, depth=24, c_puct=1.5, gamma=0.99):
+def puct_search(
+    game, net, device="cpu", simulations=64, depth=24,
+    c_puct=1.5, gamma=0.99, return_policy=False,
+):
     legal = game.legal_moves()
     if not legal:
         return None
@@ -91,7 +94,19 @@ def puct_search(game, net, device="cpu", simulations=64, depth=24, c_puct=1.5, g
             root.visits += 1
 
     if root.edges is None:
-        return legal[0]
+        action = legal[0]
+        if not return_policy:
+            return action
+        policy = torch.zeros(N_ACTIONS)
+        policy[action_index(*action)] = 1.0
+        return action, policy
     action_id = max(root.edges.items(), key=lambda item: item[1].visits)[0]
-    return index_action(action_id)
-
+    action = index_action(action_id)
+    if not return_policy:
+        return action
+    visits = torch.zeros(N_ACTIONS)
+    for child_action, edge in root.edges.items():
+        visits[child_action] = edge.visits
+    if visits.sum() == 0:
+        visits[action_id] = 1.0
+    return action, visits / visits.sum()
