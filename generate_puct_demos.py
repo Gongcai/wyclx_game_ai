@@ -25,6 +25,7 @@ def main():
     ap.add_argument("--temperature-moves", type=int, default=20)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--death-penalty", type=float, default=0.0)
+    ap.add_argument("--gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--seed", type=int, default=20000)
     ap.add_argument("--out", default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -34,6 +35,7 @@ def main():
     net = PolicyValueNet(value_outputs=checkpoint.get("value_outputs", 2)).to(args.device)
     net.load_state_dict(checkpoint["model"])
     net.eval()
+    gamma = args.gamma if args.gamma is not None else checkpoint.get("gamma", 0.99)
     weights, capped = load_weights(args.dist)
     sample_generator = torch.Generator().manual_seed(args.seed)
     episodes = []
@@ -49,6 +51,7 @@ def main():
             states.append(encode(game))
             action, policy = puct_search(
                 game, net, args.device, args.simulations, args.depth,
+                gamma=gamma,
                 death_penalty=args.death_penalty,
                 return_policy=True,
             )
@@ -97,14 +100,19 @@ def main():
             "simulations": args.simulations,
             "depth": args.depth,
             "death_penalty": args.death_penalty,
+            "gamma": gamma,
             "episodes": episodes,
         },
         out,
     )
+    game_n9 = sorted(len(episode["n9_steps"]) for episode in episodes)
+    p90 = game_n9[max(0, (len(game_n9) * 9 + 9) // 10 - 1)]
     print(
         f"已保存 {out}: {len(episodes)} 局, "
         f"{sum(len(e['actions']) for e in episodes)} 步, "
         f"{sum(len(e['n9_steps']) for e in episodes)} 个9, "
+        f"单局均值={sum(game_n9) / len(game_n9):.2f} P90={p90} "
+        f"最高={max(game_n9)} 最长={max(len(e['actions']) for e in episodes)}步, "
         f"用时 {time.time() - started:.1f}s"
     )
 

@@ -102,6 +102,8 @@ def main():
     ap.add_argument("--death-horizon", type=int, default=16)
     ap.add_argument("--mature-policy-weight", type=float, default=1.0, help="首个9之后状态的额外策略权重")
     ap.add_argument("--high-tile-policy-weight", type=float, default=0.0, help="棋盘含7/8状态的额外策略权重")
+    ap.add_argument("--elite-score-threshold", type=int, default=0, help="整局9数量达到该值视为精英轨迹")
+    ap.add_argument("--elite-policy-weight", type=float, default=0.0, help="精英轨迹的额外策略权重")
     ap.add_argument("--puct-policy-weight", type=float, default=1.0, help="PUCT 软策略目标的权重倍率")
     ap.add_argument("--val-ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
@@ -153,10 +155,18 @@ def main():
             -1, COLS, H, GRID_CLASSES,
         )
         high_tile = (grid[..., 6:8].sum(dim=(1, 2, 3)) > 0).float()
+        elite = torch.cat([
+            torch.full(
+                (len(episode["n9"]),),
+                float(int(episode["n9"].sum()) >= args.elite_score_threshold),
+            )
+            for episode in selected
+        ])
         policy_weight = source_weight * (
             1.0
             + args.mature_policy_weight * mature
             + args.high_tile_policy_weight * high_tile
+            + args.elite_policy_weight * elite
         )
         return states, policy_targets, future, distance, death, policy_weight
 
@@ -230,6 +240,8 @@ def main():
                 "mature_policy_weight": args.mature_policy_weight,
                 "puct_policy_weight": args.puct_policy_weight,
                 "high_tile_policy_weight": args.high_tile_policy_weight,
+                "elite_score_threshold": args.elite_score_threshold,
+                "elite_policy_weight": args.elite_policy_weight,
                 "death_weight": args.death_w,
                 "death_horizon": args.death_horizon,
             },

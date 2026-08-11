@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--puct-simulations", type=int, default=64)
     ap.add_argument("--puct-depth", type=int, default=24)
     ap.add_argument("--puct-death-penalty", type=float, default=0.0)
+    ap.add_argument("--puct-gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--json-out", default=None, help="同时保存机器可读结果")
     args = ap.parse_args()
@@ -47,6 +48,7 @@ def main():
     game = Game(rng=random.Random(args.seed), drop_sampler=make_sampler(weights, capped))
     agent = None
     pv_net = None
+    puct_gamma = 0.99
     if args.policy == "agent":
         agent = DQN(device=args.device, arch=args.arch)
         agent.load(args.model)
@@ -55,6 +57,7 @@ def main():
         pv_net = PolicyValueNet(value_outputs=checkpoint.get("value_outputs", 2)).to(args.device)
         pv_net.load_state_dict(checkpoint["model"])
         pv_net.eval()
+        puct_gamma = args.puct_gamma if args.puct_gamma is not None else checkpoint.get("gamma", 0.99)
 
     n9 = deaths = decision_count = 0
     episode_moves = 0
@@ -80,6 +83,7 @@ def main():
             action = puct_search(
                 game, pv_net, args.device,
                 args.puct_simulations, args.puct_depth,
+                gamma=puct_gamma,
                 death_penalty=args.puct_death_penalty,
             )
         elif args.policy == "greedy":
