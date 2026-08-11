@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--max-moves", type=int, default=300)
     ap.add_argument("--simulations", type=int, default=64)
     ap.add_argument("--depth", type=int, default=24)
+    ap.add_argument("--c-puct", type=float, default=1.5, help="PUCT 先验探索强度")
     ap.add_argument("--temperature-moves", type=int, default=20)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--death-penalty", type=float, default=0.0)
@@ -60,6 +61,7 @@ def main():
             states.append(encode(game))
             search_result = puct_search(
                 game, net, args.device, args.simulations, args.depth,
+                c_puct=args.c_puct,
                 gamma=gamma,
                 death_penalty=args.death_penalty,
                 chance_samples=args.chance_samples,
@@ -120,6 +122,7 @@ def main():
             "source_model": args.model,
             "simulations": args.simulations,
             "depth": args.depth,
+            "c_puct": args.c_puct,
             "death_penalty": args.death_penalty,
             "chance_samples": args.chance_samples,
             "chance_widening": args.chance_widening,

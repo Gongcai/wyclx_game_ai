@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--pv-model", default=None)
     ap.add_argument("--puct-simulations", type=int, default=64)
     ap.add_argument("--puct-depth", type=int, default=24)
+    ap.add_argument("--puct-c", type=float, default=1.5, help="PUCT 先验探索强度")
     ap.add_argument("--puct-death-penalty", type=float, default=0.0)
     ap.add_argument("--puct-chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
     ap.add_argument("--puct-chance-widening", type=float, default=0.0)
@@ -89,6 +90,7 @@ def main():
             action = puct_search(
                 game, pv_net, args.device,
                 args.puct_simulations, args.puct_depth,
+                c_puct=args.puct_c,
                 gamma=puct_gamma,
                 death_penalty=args.puct_death_penalty,
                 chance_samples=args.puct_chance_samples,
