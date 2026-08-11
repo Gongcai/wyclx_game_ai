@@ -1,0 +1,54 @@
+"""用于 PUCT/MCTS 的列置换等变 Policy+Value 网络。"""
+
+import torch
+import torch.nn as nn
+
+from agents.dqn import COLS, GRID_CLASSES, H, N_ACTIONS, index_action
+
+
+class PolicyValueNet(nn.Module):
+    def __init__(self, hidden=128):
+        super().__init__()
+        col_dim = H * GRID_CLASSES + 1
+        global_dim = 6
+        self.col_encoder = nn.Sequential(
+            nn.Linear(col_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+        )
+        self.policy_head = nn.Sequential(
+            nn.Linear(hidden * 3 + global_dim, hidden * 2),
+            nn.ReLU(),
+            nn.Linear(hidden * 2, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden + global_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden // 2),
+            nn.ReLU(),
+            nn.Linear(hidden // 2, 2),
+        )
+        pairs = [index_action(i) for i in range(N_ACTIONS)]
+        self.register_buffer("src_idx", torch.tensor([s for s, _ in pairs]))
+        self.register_buffer("dst_idx", torch.tensor([d for _, d in pairs]))
+
+    def forward(self, x):
+        grid_dim = COLS * H * GRID_CLASSES
+        grid = x[:, :grid_dim].reshape(-1, COLS, H * GRID_CLASSES)
+        meta = x[:, grid_dim:]
+        preview = meta[:, 4:4 + COLS].unsqueeze(-1)
+        col = self.col_encoder(torch.cat([grid, preview], dim=-1))
+        pooled = col.mean(dim=1)
+        global_meta = torch.cat([meta[:, :4], meta[:, 4 + COLS:]], dim=1)
+        global_features = torch.cat([pooled, global_meta], dim=1)
+        expanded = global_features.unsqueeze(1).expand(-1, N_ACTIONS, -1)
+        pair = torch.cat([col[:, self.src_idx], col[:, self.dst_idx], expanded], dim=-1)
+        policy = self.policy_head(pair).squeeze(-1)
+        values = self.value_head(global_features)
+        future_n9 = values[:, 0]
+        next9_fraction = torch.sigmoid(values[:, 1])
+        return policy, future_n9, next9_fraction
+

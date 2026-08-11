@@ -15,7 +15,7 @@ from game import Game
 
 
 def play_one(args):
-    seed, weights, capped, depth, width, min_score, max_moves = args
+    seed, weights, capped, depth, width, min_score, max_moves, continue_after_score = args
     game = Game(rng=random.Random(seed), drop_sampler=make_sampler(weights, capped))
     states = []
     actions = []
@@ -23,7 +23,12 @@ def play_one(args):
     next_states = []
     next_masks = []
     dones = []
-    while not game.dead and game.moves < max_moves and game.score < min_score:
+    n9_events = []
+    while (
+        not game.dead
+        and game.moves < max_moves
+        and (continue_after_score or game.score < min_score)
+    ):
         action = beam_policy(game, depth=depth, width=width)
         if action is None:
             break
@@ -32,13 +37,15 @@ def play_one(args):
         if not game.move(*action):
             break
         n9 = sum(event >= 9 for event in game.events)
+        n9_events.append(n9)
         interm = sum(event for event in game.events if event < 9)
         reward = -0.05 + 10.0 * n9 + interm - 5.0 * game.dead
         reached_goal = game.score >= min_score
+        terminal = game.dead or (reached_goal and not continue_after_score)
         rewards.append(reward)
         next_states.append(encode(game))
-        dones.append(float(game.dead or reached_goal))
-        next_masks.append(torch.zeros(N_ACTIONS) if game.dead or reached_goal else legal_mask(game))
+        dones.append(float(terminal))
+        next_masks.append(torch.zeros(N_ACTIONS) if terminal else legal_mask(game))
     if game.score < min_score:
         return None
     return {
@@ -51,6 +58,8 @@ def play_one(args):
         "next_states": torch.stack(next_states),
         "next_masks": torch.stack(next_masks),
         "dones": torch.tensor(dones, dtype=torch.float32),
+        "n9": torch.tensor(n9_events, dtype=torch.float32),
+        "n9_steps": [i + 1 for i, count in enumerate(n9_events) for _ in range(count)],
     }
 
 
@@ -63,6 +72,7 @@ def main():
     ap.add_argument("--beam-width", type=int, default=8)
     ap.add_argument("--min-score", type=int, default=9)
     ap.add_argument("--max-moves", type=int, default=200)
+    ap.add_argument("--continue-after-score", action="store_true", help="首个9后继续到死亡或步数上限")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -81,6 +91,7 @@ def main():
             args.beam_width,
             args.min_score,
             args.max_moves,
+            args.continue_after_score,
         )
         for i in range(args.episodes)
     ]
@@ -95,14 +106,16 @@ def main():
                 print(f"[{i:>6}/{args.episodes}] 成功 {len(demos):>5}", flush=True)
 
     transitions = sum(len(demo["actions"]) for demo in demos)
+    total_n9 = sum(int(demo["n9"].sum()) for demo in demos)
     torch.save(
         {
-            "version": 2,
+            "version": 3,
             "dist": args.dist,
             "search_depth": args.search_depth,
             "beam_width": args.beam_width,
             "min_score": args.min_score,
             "max_moves": args.max_moves,
+            "continue_after_score": args.continue_after_score,
             "episodes": demos,
         },
         out,
@@ -110,7 +123,7 @@ def main():
     elapsed = time.time() - started
     print(
         f"已保存 {out}: 成功 {len(demos)}/{args.episodes}, "
-        f"转移 {transitions}, 用时 {elapsed:.1f}s"
+        f"合成9 {total_n9}, 转移 {transitions}, 用时 {elapsed:.1f}s"
     )
 
 

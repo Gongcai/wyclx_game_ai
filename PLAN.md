@@ -8,6 +8,8 @@
 
 **核心难点**：真实游戏的掉落分布未知（实测后期小值极少，无法大样本验证）→ 采用 **model selection**：在不同假设分布下训练多个智能体，实机对拍择优。
 
+**速度约束**：动画不可跳过，AI 实机上限约 2~3 step/s（人类鼠标操作约 1 step/s），因此 30 分钟估算默认按 0.4 秒/步，几十毫秒级搜索推理可以接受。
+
 ## 2. 已确认规则（控制台 MVP 已实现并验证）
 
 | 规则 | 实现 |
@@ -44,7 +46,11 @@
   - 全动作可执行（自杀合法），用 legal_mask 屏蔽"源空/同列"动作
 - **基线对照**（`agents/baselines.py`）：随机合法动作、贪心（模拟每个合法动作取即时收益+栈高惩罚）
 - **搜索基线**：`eval.py` 已提供基于真实 `Game` 深拷贝的 beam search（`--search-depth`、`--beam-width`）；已公开掉落预告按真实值规划，未知未来掉落使用仅由可观察盘面构造的确定性模拟种子，禁止读取真实 RNG 隐藏状态。它计算较慢，但可用于验证可达性和生成示范轨迹。
+- **随机 MCTS**：`agents/mcts.py` 在未知掉落处用独立随机样本构造机会结果，已公开 preview 保持不变；`eval_competition.py --policy mcts` 可与 beam 比较首个 9 成本、后续 9 间隔和每千步吞吐。
 - **示范生成**：`generate_demos.py --dist uniform --episodes 100 --workers 4` 并行运行 beam search，仅保存达到目标分数的完整 transition（状态、动作、奖励、下一状态、mask、终止标志）至 `runs/demos/`。
+- **长局示范**：增加 `--continue-after-score --max-moves 500` 后，首个 9 不再终止轨迹，并逐步保存 `n9`/`n9_steps`，用于学习成熟盘面的后续合成成本。
+- **Policy+Value**：`train_policy_value.py` 使用等变列编码，联合预测 beam 动作、未来窗口内折扣 9 数量和距下一个 9 的步数，作为后续 PUCT/MCTS 的先验与叶节点评估。
+- **PUCT**：`agents/puct.py` 在每条模拟中独立采样未知掉落，用 Policy head 提供合法动作先验、Value head 评估叶节点；通过 `eval_competition.py --policy puct --pv-model ...` 测试比赛吞吐。
 - **行为克隆**：`train_bc.py --demos runs/demos/uniform-beam.pt` 按局划分训练/验证示范，保存的权重可直接传给 `eval.py --model`；由于闭环分布偏移，当前仅作为诊断，不作为 DQN 初始化。
 - **DQfD 式训练**：新训练可加 `--prefill-demos runs/demos/uniform-beam.pt`；示范保存在独立 expert 池，每个 batch 固定按 `--expert-ratio` 抽样，并叠加 `--expert-bc-w` 动作监督损失，避免被在线失败 replay 稀释。
 - **DAgger**：`train_dagger.py` 让当前策略进入自己的状态分布，并逐步降低教师执行概率；每个访问状态都由无 oracle beam 标注后加入聚合数据，用于修复纯行为克隆的闭环分布偏移。
@@ -55,6 +61,7 @@
 - `train.py`：多环境并行（--n-envs 8），每步训练，`runs/<run_id>/` 存 best.pt / final.pt / metrics.jsonl
 - `eval.py`：固定种子 N 局，对比 agent / beam / greedy / random，输出平均得分、存活步数、合成 9 数
 - `eval_competition.py`：跨死亡自动重开，在固定动作预算下统计每千步合成 9，并结合实机单步耗时和本地决策延迟估算 30 分钟成绩
+  - 分开统计每局首个 9 所需步数和同局后续 9 的间隔，用于判断继续经营成熟盘面与主动死亡重开的盈亏平衡点
 - 死亡局编码保护：栈可临时高 8，编码槽位按 7 截断
 
 ### 3.5 多分布 model selection
