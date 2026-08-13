@@ -16,13 +16,26 @@ set -euo pipefail
 
 # ---------- 用户需按平台调整 ----------
 VENV="${VENV:-$PWD/.venv}"                 # Python 环境（海光平台装 DTK 版 torch）
+CONDA_ENV="${CONDA_ENV:-dcu}"              # 若用 conda 环境（海光推荐），设非空即激活它
+DTK_MODULE="${DTK_MODULE:-compiler/dtk/25.04}"   # 与 torch das 版本匹配的 DTK 模块
 GPUS="${GPUS:-8}"                          # 本作业使用的 GPU 数
 ROUND="${ROUND:-1}"                        # bootstrap 轮次（决定 max-moves 与产物名）
 BASE_MODEL="${BASE_MODEL:-runs/demos/high-halving8-gumbel48-pv.pt}"
 DIST="${DIST:-high}"
-# 海光 DCU 平台若需加载 DTK 环境，取消注释并按实际路径修改：
-# source /opt/hygon/DTK/env.sh
-# 或根据平台文档设置 HIP_VISIBLE_DEVICES（SLURM --gres 会自动设置）
+# 海光 DCU 平台：加载 DTK 模块 + 环境（SLURM --gres=dcu:8 会自动设置可见设备）
+module load "$DTK_MODULE"
+source /opt/hygon/env.sh
+if [ -n "${CONDA_ENV:-}" ]; then
+    module load anaconda3/2023.09
+    conda activate "$CONDA_ENV"
+fi
+# Python 解释器：conda 环境优先，其次 venv，最后 PATH
+if [ -n "${CONDA_ENV:-}" ]; then
+    PY="$(which python)"
+else
+    PY="$VENV/bin/python"
+    [ -x "$PY" ] || PY=python
+fi
 # ---------------------------------------
 
 # 每轮拉长局上限：r1=2000, r2=4000, r3=8000 ...
@@ -38,11 +51,11 @@ mkdir -p runs/demos
 echo "===== 轮次 $ROUND: max_moves=$MAX_MOVES, gpus=$GPUS, seed=$SEED_BASE ====="
 
 # 0) 平台冒烟（失败即退出，避免空跑 4 小时）
-$VENV/bin/python deploy/smoke_dcu.py --model "$BASE_MODEL"
+"$PY" deploy/smoke_dcu.py --model "$BASE_MODEL"
 echo "冒烟通过，开始长局自对弈..."
 
 # 1) 多卡长局自我对弈（8 卡并行，约 4 小时）
-$VENV/bin/python launch_selfplay.py \
+"$PY" launch_selfplay.py \
     --model "$BASE_MODEL" \
     --gpus "$GPUS" \
     --episodes-per-gpu "$EPISODES_PER_GPU" \
@@ -52,7 +65,7 @@ $VENV/bin/python launch_selfplay.py \
     --out "$SELFPLAY_OUT"
 
 # 2) 更大网络从零训练（hidden 256，混入旧长局示范）
-$VENV/bin/python train_policy_value.py \
+"$PY" train_policy_value.py \
     --demos "$SELFPLAY_OUT" \
            runs/demos/high-long-64.pt \
            runs/demos/high-long-64-s1000.pt \
@@ -67,7 +80,7 @@ $VENV/bin/python train_policy_value.py \
     --out "$MODEL_OUT"
 
 # 3) 配对评测 vs 当前推荐（CI 为正才考虑替换）
-$VENV/bin/python eval_paired_puct.py \
+"$PY" eval_paired_puct.py \
     --models gumbel48="$BASE_MODEL" \
              "h256-r${ROUND}=$MODEL_OUT" \
     --tree-reuse-models gumbel48 "h256-r${ROUND}" \
