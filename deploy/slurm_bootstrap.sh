@@ -25,13 +25,11 @@ DIST="${DIST:-high}"
 # 海光 DCU 平台：加载 DTK 模块 + 环境（SLURM --gres=dcu:8 会自动设置可见设备）
 module load "$DTK_MODULE"
 source /opt/hygon/env.sh
+# Python 解释器：conda 环境（用路径直接调用，不依赖 conda activate）→ venv → PATH
 if [ -n "${CONDA_ENV:-}" ]; then
     module load anaconda3/2023.09
-    conda activate "$CONDA_ENV"
-fi
-# Python 解释器：conda 环境优先，其次 venv，最后 PATH
-if [ -n "${CONDA_ENV:-}" ]; then
-    PY="$(which python)"
+    PY="$(dirname "$(dirname "$(which conda)")")/envs/$CONDA_ENV/bin/python"
+    [ -x "$PY" ] || PY=python
 else
     PY="$VENV/bin/python"
     [ -x "$PY" ] || PY=python
