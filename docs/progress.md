@@ -444,6 +444,21 @@ PUCT(gumbel48):        38.4/千步  27死  ~185步/局  首9 54.1
 - 这是诊断不是部署（真实游戏无法预知）；价值在指明"降低不确定性"方向。
 - 深度-性能曲线待映射（深度 8 可能保留大部分增益）。
 
+## 血缘重启（heuristic-teacher-reboot 分支）：启发式当教师
+
+旧血缘（gumbel48 → human-policy2 → distill24 → 从零的 longgame256-elite6）每一代
+都是 policy_head_only 微调，第 0 代是 beam search 教出来的——能力上限被锁死。重启
+方案：**破掉旧血缘，从零训练（init_model=None），教师 = 纯启发式 beam**。
+
+- 教师示范：`runs/demos/high-heuristic-beam-80.pt`（80 局、16603 步、547 个9）
+- 第 0 代：`runs/demos/high-heuristic-scratch-pv.pt`（从零，编码器+策略+价值全学；
+  val top-1 48.3%，value_mae 0.649——比旧血缘更干净的价值信号）
+- 配对评测：PUCT(scratch) vs PUCT(gumbel48)，reuse@128-d16，32 seed：
+  **scratch 均值 3.34 vs gumbel48 5.69，配对差 -2.34 [-3.25, -1.34]，W/T/L=5/0/27**。
+  启发式教师从零学明显更差。**启发式无法当教师**第三次被证实（policy_head_only
+  蒸馏 -1.53、从零 -2.34、独立策略 35.8<38.4）。启发式是强独立策略，但行为转移给
+  神经先验严格更弱。血缘重启失败，gumbel48 仍是唯一最强学习模型。
+
 ## 已停止或暂缓的实验
 
 - afterstate Q：离线 MAE 可降到 0.263，但闭环退化。
