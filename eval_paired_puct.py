@@ -11,7 +11,7 @@ import torch
 
 from agents.dist import load_weights, make_sampler
 from agents.policy_value import PolicyValueNet
-from agents.puct import puct_search
+from agents.puct import PuctTree, advance_tree, puct_search
 from game import Game
 
 
@@ -120,12 +120,25 @@ def main():
     ap.add_argument("--chance-samples", type=int, default=8)
     ap.add_argument("--chance-widening", type=float, default=0.5)
     ap.add_argument("--root-min-visits", type=int, default=2)
+    ap.add_argument("--sequential-models", nargs="*", default=[], help="启用 sequential halving 的模型标签")
+    ap.add_argument("--tree-reuse-models", nargs="*", default=[], help="跨真实动作复用搜索树的模型标签")
+    ap.add_argument("--depth-overrides", nargs="*", default=[], help="LABEL:depth 覆盖单个模型的搜索深度")
+    ap.add_argument("--sims-overrides", nargs="*", default=[], help="LABEL:sims 覆盖单个模型的模拟次数")
+    ap.add_argument("--root-sequential-halving", type=int, default=8)
+    ap.add_argument("--root-q-scale", type=float, default=2.0)
+    ap.add_argument("--root-gumbel-noise", type=float, default=0.0)
     ap.add_argument("--json-out", required=True)
     ap.add_argument("--max-new", type=int, default=0, help="本次最多新增的模型局数，0 表示不限")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
     model_specs = parse_models(args.models)
+    depth_overrides = dict(item.split(":", 1) for item in args.depth_overrides)
+    sims_overrides = dict(item.split(":", 1) for item in args.sims_overrides)
+    for label, value in depth_overrides.items():
+        depth_overrides[label] = int(value)
+    for label, value in sims_overrides.items():
+        sims_overrides[label] = int(value)
     config = {
         "models": dict(model_specs), "dist": args.dist, "episodes": args.episodes,
         "seed": args.seed, "max_moves": args.max_moves,
@@ -134,6 +147,13 @@ def main():
         "chance_samples": args.chance_samples,
         "chance_widening": args.chance_widening,
         "root_min_visits": args.root_min_visits,
+        "sequential_models": sorted(args.sequential_models),
+        "tree_reuse_models": sorted(args.tree_reuse_models),
+        "depth_overrides": {k: str(v) for k, v in depth_overrides.items()},
+        "sims_overrides": {k: str(v) for k, v in sims_overrides.items()},
+        "root_sequential_halving": args.root_sequential_halving,
+        "root_q_scale": args.root_q_scale,
+        "root_gumbel_noise": args.root_gumbel_noise,
     }
     rows = []
     if os.path.exists(args.json_out):
@@ -163,17 +183,31 @@ def main():
             )
             started = time.time()
             n9_steps = []
+            tree = PuctTree() if label in args.tree_reuse_models else None
+            depth = depth_overrides.get(label, args.depth)
+            simulations = sims_overrides.get(label, args.simulations)
             while not game.dead and game.moves < args.max_moves:
                 action = puct_search(
-                    game, net, args.device, args.simulations, args.depth,
+                    game, net, args.device, simulations, depth,
                     c_puct=args.c_puct, gamma=gamma,
                     death_penalty=args.death_penalty,
                     chance_samples=args.chance_samples,
                     chance_widening=args.chance_widening,
-                    root_min_visits=args.root_min_visits,
+                    root_min_visits=(
+                        0 if label in args.sequential_models else args.root_min_visits
+                    ),
+                    root_sequential_halving=(
+                        args.root_sequential_halving
+                        if label in args.sequential_models else 0
+                    ),
+                    root_q_scale=args.root_q_scale,
+                    root_gumbel_noise=args.root_gumbel_noise,
+                    tree=tree,
                 )
                 if action is None or not game.move(*action):
                     break
+                if tree is not None:
+                    advance_tree(tree, action, game)
                 n9_steps.extend([game.moves] * sum(event >= 9 for event in game.events))
             rows.append({
                 "model": label, "seed": seed, "n9": len(n9_steps),

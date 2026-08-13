@@ -116,7 +116,7 @@ def append_empty_history(episode):
     return torch.stack(enriched)
 
 
-def episode_targets(n9, horizon, gamma, death_horizon, terminal_death=True):
+def episode_targets(n9, horizon, gamma, death_horizon, terminal_death=True, death_tau=0):
     n = len(n9)
     future = torch.zeros(n)
     distance = torch.ones(n)
@@ -129,7 +129,12 @@ def episode_targets(n9, horizon, gamma, death_horizon, terminal_death=True):
             discount *= gamma
     death = torch.zeros(n)
     if terminal_death:
-        death[max(0, n - death_horizon):] = 1.0
+        if death_tau > 0:
+            # 平滑死亡临近度：exp(-到死亡步数/tau)，越接近死亡越接近 1，向过去平滑衰减
+            steps_to_death = torch.arange(n, 0, -1, dtype=torch.float32)
+            death = torch.exp(-steps_to_death / death_tau)
+        else:
+            death[max(0, n - death_horizon):] = 1.0
     return future, distance, death
 
 
@@ -184,7 +189,15 @@ def main():
         "--policy-head-only", action="store_true",
         help="冻结编码器和价值头，只蒸馏 PUCT 策略头",
     )
+    ap.add_argument(
+        "--value-head-only", action="store_true",
+        help="冻结编码器和策略头，只用广覆盖示范重训价值头",
+    )
     ap.add_argument("--death-horizon", type=int, default=16)
+    ap.add_argument(
+        "--death-tau", type=float, default=0,
+        help=">0 时用平滑死亡临近度 exp(-到死亡步数/tau) 替代二值死亡目标",
+    )
     ap.add_argument("--mature-policy-weight", type=float, default=1.0, help="首个9之后状态的额外策略权重")
     ap.add_argument("--high-tile-policy-weight", type=float, default=0.0, help="棋盘含7/8状态的额外策略权重")
     ap.add_argument(
@@ -227,7 +240,7 @@ def main():
         targets = [
             episode_targets(
                 episode["n9"], args.horizon, args.gamma, args.death_horizon,
-                ended_by_death(episode),
+                ended_by_death(episode), args.death_tau,
             )
             for episode in selected
         ]
@@ -313,6 +326,11 @@ def main():
             raise ValueError("--policy-head-only 需要 --init-model，且不能与 Q 头训练同时使用")
         for name, parameter in net.named_parameters():
             parameter.requires_grad = name.startswith("policy_head.")
+    if args.value_head_only:
+        if args.policy_head_only or args.freeze_base_for_q or use_afterstate_q or not args.init_model:
+            raise ValueError("--value-head-only 需要 --init-model，且不能与策略蒸馏/Q 头同时使用")
+        for name, parameter in net.named_parameters():
+            parameter.requires_grad = name.startswith("value_head.")
     opt = torch.optim.Adam(
         [parameter for parameter in net.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -367,6 +385,10 @@ def main():
         )
         if args.policy_head_only:
             val_loss = stats[1]
+        elif args.value_head_only:
+            val_loss = (
+                stats[2] + stats[3] + args.death_w * stats[4]
+            )
         else:
             val_loss = (
                 0.2 * stats[1] + stats[2] + stats[3]
@@ -412,10 +434,12 @@ def main():
                 "elite_policy_weight": args.elite_policy_weight,
                 "death_weight": args.death_w,
                 "death_horizon": args.death_horizon,
+                "death_tau": args.death_tau,
                 "afterstate_q_weight": args.afterstate_q_w,
                 "init_model": args.init_model,
                 "freeze_base_for_q": args.freeze_base_for_q,
                 "policy_head_only": args.policy_head_only,
+                "value_head_only": args.value_head_only,
                 "history_features": args.history_features,
             },
             f,

@@ -30,6 +30,9 @@ def main():
     ap.add_argument("--chance-widening", type=float, default=0.0, help="chance node 渐进扩展指数，建议 0.5")
     ap.add_argument("--save-q-targets", action="store_true", help="保存根搜索的全动作 Q reanalyse 目标")
     ap.add_argument("--root-min-visits", type=int, default=0, help="reanalyse 时强制根动作最少访问次数")
+    ap.add_argument("--root-sequential-halving", type=int, default=0, help="Gumbel 根候选数，0 表示关闭")
+    ap.add_argument("--root-q-scale", type=float, default=2.0)
+    ap.add_argument("--root-gumbel-noise", type=float, default=0.0)
     ap.add_argument("--gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
     ap.add_argument("--seed", type=int, default=20000)
     ap.add_argument("--out", default=None)
@@ -68,6 +71,9 @@ def main():
                 chance_samples=args.chance_samples,
                 chance_widening=args.chance_widening,
                 root_min_visits=args.root_min_visits,
+                root_sequential_halving=args.root_sequential_halving,
+                root_q_scale=args.root_q_scale,
+                root_gumbel_noise=args.root_gumbel_noise,
                 return_policy=True,
                 return_q=args.save_q_targets,
             )
@@ -129,6 +135,9 @@ def main():
             "chance_widening": args.chance_widening,
             "has_q_targets": args.save_q_targets,
             "root_min_visits": args.root_min_visits,
+            "root_sequential_halving": args.root_sequential_halving,
+            "root_q_scale": args.root_q_scale,
+            "root_gumbel_noise": args.root_gumbel_noise,
             "gamma": gamma,
             "episodes": episodes,
         },

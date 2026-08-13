@@ -218,6 +218,90 @@ def t_puct_depth_cutoff_uses_leaf_value():
     assert torch.isclose(q_targets[q_mask.bool()].max(), torch.tensor(2.0))
 
 
+def t_puct_sequential_halving_limits_root_candidates():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    net = PolicyValueNet(hidden=16)
+    for parameter in net.parameters():
+        torch.nn.init.zeros_(parameter)
+    action, policy = puct_search(
+        g, net, simulations=17, depth=2,
+        root_sequential_halving=4, return_policy=True,
+    )
+    assert action in g.legal_moves()
+    # halving 蒸馏目标是改进策略：覆盖全部合法动作，峰值与所选动作一致
+    legal_ids = {s * 5 + d - (1 if d > s else 0) for s, d in g.legal_moves()}
+    assert set((policy > 0).nonzero().flatten().tolist()) == legal_ids
+    assert torch.isclose(policy.sum(), torch.tensor(1.0))
+    assert int(policy.argmax()) == action[0] * 5 + action[1] - (1 if action[1] > action[0] else 0)
+
+
+def t_puct_safe_veto_excludes_guaranteed_death():
+    from agents.dqn import action_index
+    from agents.puct import _unsafe_preview_actions
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    # 第4步：c0 高度7、顶为7，预告给 c0 再叠 7 -> 顶2个7不合并 -> 8高死亡
+    g.stacks = [[7, 1, 1, 1, 1, 1, 1], [2], [], [], [], []]
+    g.moves = 3
+    g.preview = [7, 1, 1, 1, 1, 1]
+    g.max_merged = 5
+    unsafe = _unsafe_preview_actions(g)
+    assert action_index(0, 1) not in unsafe   # 移走 c0 顶7 -> 安全
+    assert action_index(1, 2) in unsafe       # 不动 c0 -> 掉落必死
+    net = PolicyValueNet(hidden=16)
+    for parameter in net.parameters():
+        torch.nn.init.zeros_(parameter)
+    action = puct_search(g, net, simulations=16, depth=2, safe_veto=True)
+    assert action[0] == 0  # 只能选移走 c0 顶的动作
+
+
+def t_puct_tree_reuse_advances_and_matches_chance():
+    from agents.puct import PuctTree, advance_tree
+
+    net = PolicyValueNet(hidden=16)
+    for parameter in net.parameters():
+        torch.nn.init.zeros_(parameter)
+    # 非 chance 边：move 后 moves=1，advance 直接进入 edge.child
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    tree = PuctTree()
+    action = puct_search(g, net, simulations=16, depth=2, chance_samples=1, tree=tree)
+    assert tree.node is not None and tree.node.edges is not None
+    assert g.move(*action)
+    advance_tree(tree, action, g)
+    assert tree.node is not None
+    warm_visits = tree.node.visits
+    # 暖树可继续搜索
+    action = puct_search(g, net, simulations=16, depth=2, chance_samples=1, tree=tree)
+    assert action in g.legal_moves()
+    assert tree.node.visits >= warm_visits
+    # chance 边：第 3 步落在 moves%4==3，固定采样器保证搜索结果与真实 preview 一致
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    tree = PuctTree()
+    for _ in range(2):
+        action = puct_search(g, net, simulations=8, depth=2, chance_samples=1, tree=tree)
+        assert g.move(*action)
+        advance_tree(tree, action, g)
+    action = puct_search(g, net, simulations=16, depth=2, chance_samples=1, tree=tree)
+    assert g.move(*action)
+    assert g.preview == [1] * 6
+    advance_tree(tree, action, g)
+    assert tree.node is not None
+    # 未搜索过的动作：推进后清空，回退到冷启动
+    tree = PuctTree()
+    advance_tree(tree, (0, 1), g)
+    assert tree.node is None
+
+
+def t_cycle_search_returns_legal_and_covers_phases():
+    from agents.cycle_search import cycle_search
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    for _ in range(12):
+        action = cycle_search(g, width=4, depth_moves=4, n_samples=2)
+        assert action is not None and action in g.legal_moves()
+        assert g.move(*action)
+    # 各相位都应覆盖：跑 12 步包含 3 个完整周期
+    assert g.moves == 12
+
+
 def t_human_structure_prefers_ordered_stacks():
     ordered = Game(rng=random.Random(0))
     ordered.stacks = [[1, 2, 3, 7], [2, 3, 6], [], [], [], []]
@@ -251,6 +335,10 @@ def run_all():
     t_policy_value_accepts_empty_history()
     t_puct_root_min_visits_covers_legal_actions()
     t_puct_depth_cutoff_uses_leaf_value()
+    t_puct_sequential_halving_limits_root_candidates()
+    t_puct_tree_reuse_advances_and_matches_chance()
+    t_puct_safe_veto_excludes_guaranteed_death()
+    t_cycle_search_returns_legal_and_covers_phases()
     t_human_structure_prefers_ordered_stacks()
     print("all tests passed")
 

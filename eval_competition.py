@@ -9,18 +9,20 @@ import time
 import torch
 
 from agents.baselines import greedy_policy, random_policy
+from agents.cycle_search import cycle_search
+from agents.heuristic import HeuristicWeights, heuristic_policy_beam
 from agents.dist import load_weights, make_sampler
 from agents.dqn import DQN, encode, index_action, legal_mask
 from agents.mcts import mcts_policy
 from agents.policy_value import PolicyValueNet
-from agents.puct import puct_search
+from agents.puct import PuctTree, advance_tree, puct_search
 from agents.search import beam_policy
 from game import Game
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--policy", choices=("agent", "beam", "mcts", "puct", "greedy", "random"), default="agent")
+    ap.add_argument("--policy", choices=("agent", "beam", "mcts", "puct", "heuristic", "cycle", "greedy", "random"), default="agent")
     ap.add_argument("--model", default=None)
     ap.add_argument("--arch", choices=("mlp", "equivariant"), default="mlp")
     ap.add_argument("--dist", default="uniform")
@@ -39,7 +41,33 @@ def main():
     ap.add_argument("--puct-chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
     ap.add_argument("--puct-chance-widening", type=float, default=0.0)
     ap.add_argument("--puct-root-min-visits", type=int, default=0)
+    ap.add_argument("--puct-safe-veto", action="store_true", help="第4步预告已知时硬性排除必然溢出动作（若存在安全动作）")
+    ap.add_argument("--puct-shape-over-w", type=float, default=0.0, help="叶价值塑形：列高超过6每格惩罚权重")
+    ap.add_argument("--puct-shape-low-w", type=float, default=0.0, help="叶价值塑形：低牌(<=3)每张惩罚权重")
+    ap.add_argument("--puct-root-sequential-halving", type=int, default=0)
+    ap.add_argument("--puct-root-q-scale", type=float, default=2.0)
+    ap.add_argument("--puct-root-gumbel-noise", type=float, default=0.0)
+    ap.add_argument(
+        "--puct-tree-reuse", action="store_true",
+        help="跨真实动作复用搜索树（需 --puct-chance-samples > 0）",
+    )
     ap.add_argument("--puct-gamma", type=float, default=None, help="默认读取 Policy+Value checkpoint")
+    ap.add_argument("--foresee", type=int, default=0, help=">0 时开启预知模式，用确定性掉落序列（值为种子）")
+    ap.add_argument("--heuristic-width", type=int, default=16)
+    ap.add_argument("--heuristic-depth", type=int, default=4, help="人类推演深度，默认一个完整周期")
+    ap.add_argument("--heur-gain", type=float, default=1.0)
+    ap.add_argument("--heur-empty", type=float, default=2.0)
+    ap.add_argument("--heur-height6", type=float, default=3.0)
+    ap.add_argument("--heur-height4", type=float, default=0.4)
+    ap.add_argument("--heur-buried", type=float, default=1.5)
+    ap.add_argument("--heur-pair", type=float, default=0.6)
+    ap.add_argument("--heur-order", type=float, default=0.3)
+    ap.add_argument("--cycle-width", type=int, default=16, help="周期感知搜索 beam 宽")
+    ap.add_argument("--cycle-depth", type=int, default=4, help="周期感知搜索推演步数（默认一个完整周期）")
+    ap.add_argument("--cycle-samples", type=int, default=8, help="周期边界 expectimax 采样数")
+    ap.add_argument("--cycle-merge-w", type=float, default=1.0, help="中间合成奖励权重")
+    ap.add_argument("--cycle-pair-w", type=float, default=0.5, help="顶对子前提奖励权重")
+    ap.add_argument("--cycle-value-w", type=float, default=1.0, help="终态价值权重")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--json-out", default=None, help="同时保存机器可读结果")
     args = ap.parse_args()
@@ -49,7 +77,11 @@ def main():
     if args.policy == "puct" and not args.pv_model:
         raise ValueError("puct 策略必须提供 --pv-model")
     weights, capped = load_weights(args.dist)
-    game = Game(rng=random.Random(args.seed), drop_sampler=make_sampler(weights, capped))
+    game = Game(
+        rng=random.Random(args.seed),
+        drop_sampler=make_sampler(weights, capped),
+        future_seed=args.foresee if args.foresee else None,
+    )
     agent = None
     pv_net = None
     puct_gamma = 0.99
@@ -66,6 +98,9 @@ def main():
         pv_net.load_state_dict(checkpoint["model"])
         pv_net.eval()
         puct_gamma = args.puct_gamma if args.puct_gamma is not None else checkpoint.get("gamma", 0.99)
+    if args.puct_tree_reuse and args.puct_chance_samples <= 0:
+        raise ValueError("--puct-tree-reuse 需要 --puct-chance-samples > 0")
+    puct_tree = PuctTree() if args.puct_tree_reuse else None
 
     n9 = deaths = decision_count = 0
     episode_moves = 0
@@ -79,6 +114,8 @@ def main():
             game.reset()
             episode_moves = 0
             last9_move = None
+            if puct_tree is not None:
+                puct_tree.node = None
         started = time.perf_counter()
         if args.policy == "agent":
             action_id = agent.act(encode(game, args.device), legal_mask(game, args.device), 0.0)
@@ -97,6 +134,29 @@ def main():
                 chance_samples=args.puct_chance_samples,
                 chance_widening=args.puct_chance_widening,
                 root_min_visits=args.puct_root_min_visits,
+                root_sequential_halving=args.puct_root_sequential_halving,
+                root_q_scale=args.puct_root_q_scale,
+                root_gumbel_noise=args.puct_root_gumbel_noise,
+                tree=puct_tree,
+                shape_over_w=args.puct_shape_over_w,
+                shape_low_w=args.puct_shape_low_w,
+                safe_veto=args.puct_safe_veto,
+            )
+        elif args.policy == "heuristic":
+            hw = HeuristicWeights(
+                gain=args.heur_gain, empty=args.heur_empty,
+                height6=args.heur_height6, height4=args.heur_height4,
+                buried=args.heur_buried, pair=args.heur_pair,
+                order=args.heur_order,
+            )
+            action = heuristic_policy_beam(
+                game, w=hw, width=args.heuristic_width, depth=args.heuristic_depth,
+            )
+        elif args.policy == "cycle":
+            action = cycle_search(
+                game, width=args.cycle_width, depth_moves=args.cycle_depth,
+                n_samples=args.cycle_samples, w_merge=args.cycle_merge_w,
+                w_pair=args.cycle_pair_w, w_value=args.cycle_value_w,
             )
         elif args.policy == "greedy":
             action = greedy_policy(game)
@@ -106,6 +166,8 @@ def main():
         decision_count += 1
         if action is None or not game.move(*action):
             break
+        if puct_tree is not None:
+            advance_tree(puct_tree, action, game)
         episode_moves += 1
         for event in game.events:
             if event >= 9:
@@ -145,7 +207,7 @@ def main():
         f"首个9步数={first9_text}  后续9间隔={post9_text} "
         f"(后续样本 {len(post9_gaps)})\n"
         f"平均决策={avg_think * 1000:.2f}ms  实机动作假设={args.action_seconds:.3f}s\n"
-        f"预计30分钟={estimate_30m:.1f}个9  人类纪录≈160  第一名≈750"
+        f"预计30分钟={estimate_30m:.1f}个9  人类最强(限时,本大区)≈115  目标≥150"
     )
     if args.json_out:
         os.makedirs(os.path.dirname(args.json_out) or ".", exist_ok=True)

@@ -6,12 +6,15 @@ DROP_MAX = 7
 
 
 class Game:
-    def __init__(self, cols=6, rng=None, drop_sampler=None):
+    def __init__(self, cols=6, rng=None, drop_sampler=None, future_seed=None):
         self.cols = cols
         self.rng = rng or random.Random()
         self.drop_sampler = drop_sampler or (
             lambda rng, max_merged=None: rng.randint(1, min(DROP_MAX, max_merged or DROP_MAX))
         )
+        # 预知模式：future_seed 非 None 时，掉落由确定性序列决定（按周期索引），
+        # 搜索可用 future_drops() 提前获知，消除随机不确定性。
+        self.future_seed = future_seed
         self.reset()
 
     def reset(self):
@@ -24,9 +27,21 @@ class Game:
         self.last_drop = None
         self.events = []
         self._afterstate_pending = False
+        self._drop_count = 0
         self.current_cycle_empty_peak = 0
         self.recent_cycle_empty_peaks = [0, 0, 0]
         return self.observe()
+
+    def _future_drop(self, i):
+        """第 i 个未来掉落的确定性结果（用当前 max_merged 作为 cap）。"""
+        rng = random.Random((self.future_seed * 1000003 + i) & ((1 << 63) - 1))
+        return tuple(self.drop_sampler(rng, self.max_merged) for _ in range(self.cols))
+
+    def future_drops(self, ahead):
+        """预知模式：返回接下来 ahead 个周期掉落的确定值（未消耗）。"""
+        if self.future_seed is None:
+            return None
+        return [self._future_drop(self._drop_count + i) for i in range(ahead)]
 
     def observe(self):
         return [list(st) for st in self.stacks]
@@ -81,7 +96,12 @@ class Game:
         )
 
     def sample_chance(self, rng=None):
-        """按当前 afterstate 的掉落上限采样完整六列随机结果。"""
+        """按当前 afterstate 的掉落上限采样完整六列随机结果。
+
+        预知模式（future_seed 非 None）下返回确定性序列的当前周期值。
+        """
+        if self.future_seed is not None:
+            return list(self._future_drop(self._drop_count))
         rng = rng or self.rng
         return [self.drop_sampler(rng, self.max_merged) for _ in range(self.cols)]
 
@@ -126,6 +146,7 @@ class Game:
             if self.dead:
                 break
         self.last_drop = values
+        self._drop_count += 1
 
     def _merge_col(self, c):
         st = self.stacks[c]
