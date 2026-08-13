@@ -10,7 +10,7 @@ import time
 import torch
 
 from agents.dist import load_weights, make_sampler
-from agents.policy_value import PolicyValueNet
+from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
 from agents.puct import PuctTree, advance_tree, puct_search
 from game import Game
 
@@ -49,7 +49,7 @@ def parse_models(items):
 
 def load_model(path, device):
     checkpoint = torch.load(path, weights_only=True, map_location=device)
-    net = PolicyValueNet(
+    net = PolicyValueNet(hidden=hidden_from_checkpoint(checkpoint),
         value_outputs=checkpoint.get("value_outputs", 2),
         afterstate_q=checkpoint.get("afterstate_q", False),
         history_features=checkpoint.get("history_features", False),

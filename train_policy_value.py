@@ -172,6 +172,7 @@ def metrics(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--demos", nargs="+", required=True)
+    ap.add_argument("--hidden", type=int, default=128, help="网络宽度（8卡平台可加大到 256/512）")
     ap.add_argument("--out", default=None)
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch", type=int, default=256)
@@ -285,7 +286,7 @@ def main():
     val = flatten([episode for i, episode in enumerate(episodes) if i in val_ids])
     use_afterstate_q = args.afterstate_q_w > 0
     net = PolicyValueNet(
-        value_outputs=3, afterstate_q=use_afterstate_q,
+        hidden=args.hidden, value_outputs=3, afterstate_q=use_afterstate_q,
         history_features=args.history_features,
     ).to(args.device)
     if args.init_model:

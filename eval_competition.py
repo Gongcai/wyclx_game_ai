@@ -14,7 +14,7 @@ from agents.heuristic import HeuristicWeights, heuristic_policy_beam
 from agents.dist import load_weights, make_sampler
 from agents.dqn import DQN, encode, index_action, legal_mask
 from agents.mcts import mcts_policy
-from agents.policy_value import PolicyValueNet
+from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
 from agents.puct import PuctTree, advance_tree, puct_search
 from agents.search import beam_policy
 from game import Game
@@ -90,7 +90,7 @@ def main():
         agent.load(args.model)
     elif args.policy == "puct":
         checkpoint = torch.load(args.pv_model, weights_only=True, map_location=args.device)
-        pv_net = PolicyValueNet(
+        pv_net = PolicyValueNet(hidden=hidden_from_checkpoint(checkpoint),
             value_outputs=checkpoint.get("value_outputs", 2),
             afterstate_q=checkpoint.get("afterstate_q", False),
             history_features=checkpoint.get("history_features", False),

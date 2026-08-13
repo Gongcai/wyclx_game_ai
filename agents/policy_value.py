@@ -6,6 +6,12 @@ import torch.nn as nn
 from agents.dqn import COLS, GRID_CLASSES, H, HISTORY_DIM, N_ACTIONS, index_action
 
 
+def hidden_from_checkpoint(checkpoint):
+    """从 checkpoint 的 col_encoder 首层权重推断 hidden 大小（加载大网络用）。"""
+    weight = checkpoint["model"]["col_encoder.0.weight"]
+    return weight.shape[0]
+
+
 class PolicyValueNet(nn.Module):
     def __init__(
         self, hidden=128, value_outputs=2, afterstate_q=False,
