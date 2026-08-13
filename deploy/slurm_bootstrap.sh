@@ -16,18 +16,21 @@ set -euo pipefail
 
 # ---------- 用户需按平台调整 ----------
 VENV="${VENV:-$PWD/.venv}"                 # Python 环境（海光平台装 DTK 版 torch）
-CONDA_ENV="${CONDA_ENV:-dcu}"              # 若用 conda 环境（海光推荐），设非空即激活它
+CONDA_ENV="${CONDA_ENV:-dcu}"              # 若用 conda 环境（海光推荐），设非空即用它
+CONDA_PY="${CONDA_PY:-/public/home/acgw6vr7e7/.conda/envs/dcu/bin/python}"  # 直接指定 conda python 路径（批处理 shell 里 module/conda 常不可用）
 DTK_MODULE="${DTK_MODULE:-compiler/dtk/25.04}"   # 与 torch das 版本匹配的 DTK 模块
 GPUS="${GPUS:-8}"                          # 本作业使用的 GPU 数
 ROUND="${ROUND:-1}"                        # bootstrap 轮次（决定 max-moves 与产物名）
 BASE_MODEL="${BASE_MODEL:-runs/demos/high-halving8-gumbel48-pv.pt}"
 DIST="${DIST:-high}"
-# 海光 DCU 平台：加载 DTK 模块 + 环境（SLURM --gres=dcu:8 会自动设置可见设备）
-module load "$DTK_MODULE"
-source /opt/hygon/env.sh
-# Python 解释器：conda 环境（用 conda run 解析路径，不依赖 activate）→ venv → PATH
-if [ -n "${CONDA_ENV:-}" ]; then
-    module load anaconda3/2023.09
+# 海光 DCU 平台：加载 DTK 模块 + 环境（容错——批处理 shell 可能没有 module 系统）
+source /etc/profile.d/modules.sh 2>/dev/null || true
+module load "$DTK_MODULE" 2>/dev/null || true
+source /opt/hygon/env.sh 2>/dev/null || true
+# Python 解释器：CONDA_PY 直接路径 → conda run → venv → PATH
+if [ -n "${CONDA_PY:-}" ] && [ -x "$CONDA_PY" ]; then
+    PY="$CONDA_PY"
+elif [ -n "${CONDA_ENV:-}" ]; then
     PY="$(conda run -n "$CONDA_ENV" which python 2>/dev/null | tail -1)"
     [ -x "$PY" ] || PY=python
 else
