@@ -1,7 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
-runs/
+runs/*
+!runs/h5game/
+!runs/h5game/**
 checkpoints/
 logs/
 .uv/
