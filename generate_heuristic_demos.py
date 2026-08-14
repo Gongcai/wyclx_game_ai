@@ -11,7 +11,7 @@ import time
 
 import torch
 
-from agents.dist import load_weights, make_sampler
+from agents.dist import load_weights, make_real_sampler, make_sampler
 from agents.dqn import encode
 from agents.heuristic import HeuristicWeights, heuristic_policy_beam
 from game import Game
@@ -30,13 +30,17 @@ def main():
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    weights, capped = load_weights(args.dist)
+    if args.dist == "real":
+        drop_sampler = make_real_sampler()
+    else:
+        weights, capped = load_weights(args.dist)
+        drop_sampler = make_sampler(weights, capped)
     hw = HeuristicWeights(buried=args.buried, height6=args.height6)
     episodes = []
     started = time.time()
     for ep in range(args.episodes):
         seed = args.seed + ep
-        game = Game(rng=random.Random(seed), drop_sampler=make_sampler(weights, capped))
+        game = Game(rng=random.Random(seed), drop_sampler=drop_sampler)
         states, actions, n9_events = [], [], []
         while not game.dead and game.moves < args.max_moves:
             states.append(encode(game, history=False))

@@ -7,9 +7,12 @@ from agents.dqn import COLS, GRID_CLASSES, H, HISTORY_DIM, N_ACTIONS, index_acti
 
 
 def hidden_from_checkpoint(checkpoint):
-    """从 checkpoint 的 col_encoder 首层权重推断 hidden 大小（加载大网络用）。"""
-    weight = checkpoint["model"]["col_encoder.0.weight"]
-    return weight.shape[0]
+    """从 PolicyValueNet checkpoint 的编码器权重推断网络宽度。"""
+    state = checkpoint.get("model", checkpoint)
+    weight = state.get("col_encoder.0.weight")
+    if weight is None or weight.ndim != 2:
+        raise ValueError("checkpoint 缺少 PolicyValueNet 的 col_encoder.0.weight")
+    return int(weight.shape[0])
 
 
 class PolicyValueNet(nn.Module):
