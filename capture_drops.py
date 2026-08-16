@@ -83,16 +83,42 @@ class Recognizer:
         self.tpl_pgw = self.tpl_pgh = 0.0
         if self.tpl:
             self.tw, self.th = self.tpl["size"]
-            self.has_preview_templates = bool(self.tpl.get("items_p"))
             for k, items in (("b", self.tpl["items_b"]), ("p", self.tpl.get("items_p") or {})):
                 self.tpl_items[k] = {
                     int(v): np.array(g, dtype=np.float32).reshape(self.th, self.tw, 3)
                     for v, g in items.items()}
             if not self.tpl_items["p"]:
+                # 预告兔子与棋盘同素材（半透明渲染），模板相关做过均值归一化、
+                # 对亮度衰减免疫：没有专用预告模板时直接复用棋盘模板，
+                # 远比单点颜色最近邻稳（2/3 两个米棕色仅差 ~30 色阶）。
                 self.tpl_items["p"] = self.tpl_items["b"]
+            self.has_preview_templates = bool(self.tpl_items["p"])
             c = self.tpl.get("cell", {})
             self.tpl_gw, self.tpl_gh = c.get("gw", 0.0), c.get("gh", 0.0)
             self.tpl_pgw, self.tpl_pgh = c.get("pv_gw", 0.0), c.get("pv_gh", 0.0)
+            # 预告兔子形状模板：从棋盘模板抠出兔子本体（中值背景剥离 + 最大
+            # 连通域）。与预告侧用同样的抠法，形状相关极性一致。
+            self._tpl_rabbit_norm = {}
+            self._tpl_rabbit_sq = {}
+            for v, g in self.tpl["items_b"].items():
+                if v == "0":
+                    continue
+                tbgr = np.array(g, np.float32).reshape(
+                    self.th, self.tw, 3)[:, :, ::-1]
+                med = np.median(tbgr.reshape(-1, 3), axis=0)
+                dev = np.abs(tbgr - med).sum(2)
+                m = (dev > 60).astype(np.uint8) * 255
+                m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+                n, lab, stats, _ = cv2.connectedComponentsWithStats(m)
+                if n <= 1:
+                    continue
+                best = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+                ys, xs = np.where(lab == best)
+                rabbit = tbgr[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+                a = cv2.resize(rabbit.astype(np.uint8), (48, 48)).astype(np.float32).ravel()
+                a = a - a.mean()
+                self._tpl_rabbit_norm[int(v)] = a
+                self._tpl_rabbit_sq[int(v)] = float((a * a).sum())
 
     def classify(self, img, x, y, kind="b"):
         if self.tpl:
@@ -169,6 +195,52 @@ class Recognizer:
             return None, None
         return sum(score >= threshold for score in scores) >= 4, scores
 
+    def _rabbit_from_diff(self, img, background, cx, cy, half=130, thr=80):
+        """用与空背景的差分掩码抠预告格里的兔子本体（最大紧凑连通域）。
+
+        thr=80：低于此为背景渲染噪声（<80），高于此为半透明兔子主体信号
+        （80~150+），实测该值能把两者干净分开且不切碎兔子。
+        """
+        x0, x1 = max(0, int(cx - half)), int(cx + half)
+        y0, y1 = max(0, int(cy - 70)), int(cy + 70)
+        diff = cv2.absdiff(img[y0:y1, x0:x1].astype(np.int32),
+                           background[y0:y1, x0:x1].astype(np.int32)).sum(2)
+        mask = (diff > thr).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(mask)
+        compact, fallback = [], []
+        for i in range(1, n):
+            w, h, area = (stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT],
+                          stats[i, cv2.CC_STAT_AREA])
+            if area < 400:
+                continue
+            (compact if 0.5 <= w / max(1, h) <= 2.0 else fallback).append((area, i))
+        pool = compact or fallback
+        if not pool:
+            return None
+        pool.sort(reverse=True)
+        _, pick = pool[0]
+        ys, xs = np.where(lab == pick)
+        return img[y0 + ys.min():y0 + ys.max() + 1, x0 + xs.min():x0 + xs.max() + 1]
+
+    def _classify_rabbit(self, rabbit):
+        """兔子本体形状相关（均值归一化，亮度/透明度无关）。
+
+        2/3 两个米棕色的单点色差仅 ~30 色阶，颜色最近邻经常混；形状
+        （耳形/脸型）是稳定判别特征。返回 (等级, 置信间隔)，不足门槛为 -1。
+        """
+        a = cv2.resize(rabbit, (48, 48)).astype(np.float32).ravel()
+        a = a - a.mean()
+        scores = sorted(
+            ((float(np.dot(a, self._tpl_rabbit_norm[v])) /
+              max(1e-9, np.sqrt(float((a * a).sum()) * self._tpl_rabbit_sq[v]))), v)
+            for v in self._tpl_rabbit_norm)
+        scores.reverse()
+        top, second = scores[0], scores[1]
+        if top[0] < 0.3 or top[0] - second[0] < 0.06:
+            return -1
+        return top[1]
+
     def preview_values(self, img, background=None, presence_threshold=0.015):
         if not self.preview:
             return None
@@ -176,6 +248,14 @@ class Recognizer:
             visible, _scores = self.preview_visible(img, background, presence_threshold)
             if visible is False:
                 return None
+        # 优先：兔子本体形状匹配（需要空背景参照）。比单点颜色抗光照/背景，
+        # 解决 2/3 两个米棕色易混的问题。
+        if background is not None and getattr(self, "_tpl_rabbit_norm", None):
+            out = []
+            for x, y in self.preview["centers"]:
+                rabbit = self._rabbit_from_diff(img, background, x, y)
+                out.append(self._classify_rabbit(rabbit) if rabbit is not None else -1)
+            return out
         # 专用整格模板比单点颜色更抗复杂背景；没有模板才回退到颜色。
         if self.tpl and self.has_preview_templates:
             return [self.classify(img, x, y, "p") for x, y in self.preview["centers"]]
