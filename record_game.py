@@ -12,7 +12,7 @@ import random
 import torch
 
 from agents.dist import load_weights, make_sampler
-from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
+from agents.policy_value import PolicyValueNet
 from agents.puct import PuctTree, advance_tree, puct_search
 from game import Game
 
@@ -41,7 +41,7 @@ def main():
         if not args.model:
             raise ValueError("puct 策略需要 --model")
         checkpoint = torch.load(args.model, weights_only=True, map_location=args.device)
-        net = PolicyValueNet(hidden=hidden_from_checkpoint(checkpoint),
+        net = PolicyValueNet(
             value_outputs=checkpoint.get("value_outputs", 2),
             afterstate_q=checkpoint.get("afterstate_q", False),
             history_features=checkpoint.get("history_features", False),
@@ -56,7 +56,7 @@ def main():
     print(f"===== 开局 seed={args.seed} =====")
     print(game.render())
     print()
-    while not game.dead and game.moves < args.max_moves and game.score < 9:
+    while not game.dead and game.moves < args.max_moves and game.n9_count < 1:
         pre = [list(st) for st in game.stacks]
         preview = list(game.preview) if game.preview is not None else None
         if args.policy == "heuristic":
@@ -77,7 +77,7 @@ def main():
         if args.policy == "puct":
             advance_tree(tree, action, game)
         events = list(game.events)
-        first9 = game.score >= 9
+        first9 = game.n9_count >= 1
         trace.append({
             "step": game.moves, "action": list(action),
             "pre": pre, "preview": preview,
@@ -96,7 +96,7 @@ def main():
             break
 
     print(f"===== 结束: 第 {game.moves} 步, 得分 {game.score}, "
-          f"首9达成={game.score >= 9} =====")
+          f"首9达成={game.n9_count >= 1} =====")
     if args.json_out:
         json.dump({"seed": args.seed, "trace": trace}, open(args.json_out, "w"),
                   ensure_ascii=False, indent=1)

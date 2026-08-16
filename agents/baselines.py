@@ -42,4 +42,4 @@ def play(game, policy):
         src, dst = step(game)
         if not game.move(src, dst):
             break
-    return game.score, game.moves, game.score // 9
+    return game.score, game.moves, game.n9_count

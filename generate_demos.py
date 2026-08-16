@@ -27,7 +27,7 @@ def play_one(args):
     while (
         not game.dead
         and game.moves < max_moves
-        and (continue_after_score or game.score < min_score)
+        and (continue_after_score or game.n9_count * 9 < min_score)
     ):
         action = beam_policy(game, depth=depth, width=width)
         if action is None:
@@ -40,17 +40,18 @@ def play_one(args):
         n9_events.append(n9)
         interm = sum(event for event in game.events if event < 9)
         reward = -0.05 + 10.0 * n9 + interm - 5.0 * game.dead
-        reached_goal = game.score >= min_score
+        reached_goal = game.n9_count * 9 >= min_score
         terminal = game.dead or (reached_goal and not continue_after_score)
         rewards.append(reward)
         next_states.append(encode(game))
         dones.append(float(terminal))
         next_masks.append(torch.zeros(N_ACTIONS) if terminal else legal_mask(game))
-    if game.score < min_score:
+    if game.n9_count * 9 < min_score:
         return None
     return {
         "seed": seed,
         "score": game.score,
+        "n9_count": game.n9_count,
         "moves": game.moves,
         "states": torch.stack(states),
         "actions": torch.tensor(actions, dtype=torch.long),

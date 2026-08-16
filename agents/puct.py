@@ -96,11 +96,12 @@ class _ChanceNode:
 
 
 def _unsafe_preview_actions(game):
-    """第4步（预告已知）下，动作+已知预告掉落必然溢出一列则为不安全动作。
+    """预告已知且下一次移动后即应用（决策状态 moves%4==2）时，
+    动作+已知预告掉落必然溢出一列则为不安全动作。
 
     若所有动作都不安全（盘面已注定）则返回空集，不拦截，避免无路可走。
     """
-    if game.moves % 4 != 3 or game.preview is None:
+    if game.moves % 4 != 2 or game.preview is None:
         return set()
     unsafe = set()
     safe_exists = False

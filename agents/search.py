@@ -62,8 +62,14 @@ def beam_search(game, depth=8, width=48):
         for state, first, path_value in beam:
             for action in state.legal_moves():
                 nxt = copy.deepcopy(state)
-                if not nxt.move(*action):
+                if not nxt.move_afterstate(*action):
                     continue
+                # 隐藏预告在真实环境已抽好，但当前决策者尚不可见。beam 不能通过
+                # deepcopy 读取它；在揭示节点只按同一抽样等级的分布取一个样本。
+                if nxt.chance_required():
+                    nxt.resolve_afterstate(nxt.sample_chance(nxt.rng))
+                else:
+                    nxt.resolve_afterstate()
                 root_action = action if first is None else first
                 score = path_value + _state_value(nxt)
                 candidates.append((score, nxt, root_action))

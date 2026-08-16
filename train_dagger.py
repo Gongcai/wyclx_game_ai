@@ -68,7 +68,7 @@ def evaluate(net, weights, capped, n, seed, max_moves, device):
         total_score += game.score
         total_moves += game.moves
         total_max += game.max_merged
-        successes += game.score > 0
+        successes += game.n9_count > 0
     return total_score / n, total_moves / n, total_max / n, successes / n
 
 

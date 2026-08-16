@@ -7,10 +7,10 @@ import time
 
 import torch
 
-from agents.dist import load_weights, make_sampler
+from agents.dist import load_weights, make_real_sampler, make_sampler
 from agents.dqn import encode, index_action
 from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
-from agents.puct import puct_search
+from agents.puct import PuctTree, advance_tree, puct_search
 from game import Game
 
 
@@ -28,6 +28,10 @@ def main():
     ap.add_argument("--death-penalty", type=float, default=0.0)
     ap.add_argument("--chance-samples", type=int, default=0, help="大于0时启用显式 afterstate chance node")
     ap.add_argument("--chance-widening", type=float, default=0.0, help="chance node 渐进扩展指数，建议 0.5")
+    ap.add_argument("--tree-reuse", action="store_true", help="跨真实动作复用 chance 搜索树")
+    ap.add_argument("--safe-veto", action="store_true", help="预告已知时排除必然溢出动作")
+    ap.add_argument("--shape-over-w", type=float, default=0.0)
+    ap.add_argument("--shape-low-w", type=float, default=0.0)
     ap.add_argument("--save-q-targets", action="store_true", help="保存根搜索的全动作 Q reanalyse 目标")
     ap.add_argument("--root-min-visits", type=int, default=0, help="reanalyse 时强制根动作最少访问次数")
     ap.add_argument("--root-sequential-halving", type=int, default=0, help="Gumbel 根候选数，0 表示关闭")
@@ -48,19 +52,26 @@ def main():
     net.load_state_dict(checkpoint["model"])
     net.eval()
     gamma = args.gamma if args.gamma is not None else checkpoint.get("gamma", 0.99)
-    weights, capped = load_weights(args.dist)
+    if args.dist == "real":
+        drop_sampler = make_real_sampler()
+    else:
+        weights, capped = load_weights(args.dist)
+        drop_sampler = make_sampler(weights, capped)
+    if args.tree_reuse and args.chance_samples <= 0:
+        raise ValueError("--tree-reuse 需要 --chance-samples > 0")
     sample_generator = torch.Generator().manual_seed(args.seed)
     episodes = []
     started = time.time()
     for episode_id in range(args.episodes):
         seed = args.seed + episode_id
-        game = Game(rng=random.Random(seed), drop_sampler=make_sampler(weights, capped))
+        game = Game(rng=random.Random(seed), drop_sampler=drop_sampler)
         states = []
         actions = []
         policy_targets = []
         q_targets = []
         q_masks = []
         n9_events = []
+        tree = PuctTree() if args.tree_reuse else None
         while not game.dead and game.moves < args.max_moves:
             states.append(encode(game, history=net.history_features))
             search_result = puct_search(
@@ -74,6 +85,10 @@ def main():
                 root_sequential_halving=args.root_sequential_halving,
                 root_q_scale=args.root_q_scale,
                 root_gumbel_noise=args.root_gumbel_noise,
+                tree=tree,
+                shape_over_w=args.shape_over_w,
+                shape_low_w=args.shape_low_w,
+                safe_veto=args.safe_veto,
                 return_policy=True,
                 return_q=args.save_q_targets,
             )
@@ -94,10 +109,13 @@ def main():
             policy_targets.append(policy)
             if not game.move(*action):
                 break
+            if tree is not None:
+                advance_tree(tree, action, game)
             n9_events.append(sum(event >= 9 for event in game.events))
         episode = {
             "seed": seed,
             "score": game.score,
+            "n9_count": game.n9_count,
             "moves": game.moves,
             "dead": game.dead,
             "states": torch.stack(states),
@@ -114,7 +132,7 @@ def main():
         episodes.append(episode)
         total_n9 = sum(len(episode["n9_steps"]) for episode in episodes)
         print(
-            f"[{episode_id + 1:>4}/{args.episodes}] 本局9={game.score // 9} "
+            f"[{episode_id + 1:>4}/{args.episodes}] 本局9={game.n9_count} "
             f"累计9={total_n9}",
             flush=True,
         )
@@ -133,6 +151,10 @@ def main():
             "death_penalty": args.death_penalty,
             "chance_samples": args.chance_samples,
             "chance_widening": args.chance_widening,
+            "tree_reuse": args.tree_reuse,
+            "safe_veto": args.safe_veto,
+            "shape_over_w": args.shape_over_w,
+            "shape_low_w": args.shape_low_w,
             "has_q_targets": args.save_q_targets,
             "root_min_visits": args.root_min_visits,
             "root_sequential_halving": args.root_sequential_halving,

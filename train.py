@@ -9,7 +9,7 @@ import time
 import torch
 
 from agents.baselines import play
-from agents.dist import load_weights, make_sampler
+from agents.dist import load_weights, make_sampler, make_real_sampler
 from agents.dqn import DQN, encode, index_action, legal_mask
 from game import Game
 
@@ -17,7 +17,7 @@ from game import Game
 def make_env(weights, capped, seed=None):
     return Game(
         rng=random.Random(seed),
-        drop_sampler=make_sampler(weights, capped),
+        drop_sampler=make_real_sampler() if weights == "real" else make_sampler(weights, capped),
     )
 
 
@@ -64,7 +64,7 @@ def evaluate(agent, weights, capped, n, seed, device):
                 play(g, policy)
             tot[0] += g.score
             tot[1] += g.moves
-            tot[2] += g.score // 9
+            tot[2] += g.n9_count
             tot[3] += g.max_merged
             tot[4] += sum(len(st) for st in g.stacks)
         stats[policy] = tuple(v / n for v in tot)
@@ -100,7 +100,10 @@ def main():
     args = ap.parse_args()
 
     device = args.device
-    weights, capped = load_weights(args.dist)
+    if args.dist == "real":
+        weights, capped = "real", None
+    else:
+        weights, capped = load_weights(args.dist)
     envs = [make_env(weights, capped, args.seed * 1000 + i) for i in range(args.n_envs)]
     agent = DQN(lr=args.lr, replay=args.replay, device=device, arch=args.arch)
 

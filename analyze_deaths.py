@@ -18,7 +18,7 @@ import random
 import torch
 
 from agents.dist import load_weights, make_sampler
-from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
+from agents.policy_value import PolicyValueNet
 from agents.puct import PuctTree, advance_tree, puct_search
 from game import Game, MAX_HEIGHT
 
@@ -90,7 +90,7 @@ def main():
         if not args.model:
             raise ValueError("puct 策略需要 --model")
         checkpoint = torch.load(args.model, weights_only=True, map_location=args.device)
-        net = PolicyValueNet(hidden=hidden_from_checkpoint(checkpoint),
+        net = PolicyValueNet(
             value_outputs=checkpoint.get("value_outputs", 2),
             afterstate_q=checkpoint.get("afterstate_q", False),
             history_features=checkpoint.get("history_features", False),
@@ -149,7 +149,7 @@ def main():
                 death = classify_death(pre_stacks, game.stacks, phase, action)
                 death.update({
                     "episode": ep, "seed": seed, "step": game.moves,
-                    "action": action, "n9": game.score // 9,
+                    "action": action, "n9": game.n9_count,
                     "death": True,
                 })
                 causes.setdefault(death["cause"], []).append(death)
@@ -173,7 +173,7 @@ def main():
         # 渲染死亡报告
         if game.dead:
             report = [f"===== 局 {ep} seed={seed}: 死亡于第 {game.moves} 步, "
-                      f"本局 {game.score // 9} 个9, 死因={history[-1]['phase']} ====="]
+                      f"本局 {game.n9_count} 个9, 死因={history[-1]['phase']} ====="]
             for item in history[-args.tail:]:
                 sim = Game(rng=random.Random(seed), drop_sampler=make_sampler(weights, capped))
                 sim.stacks = [list(st) for st in item["pre_stacks"]]
@@ -192,7 +192,7 @@ def main():
             reports.append("\n".join(report))
             if jsonl:
                 jsonl.write(json.dumps({
-                    "episode": ep, "seed": seed, "n9": game.score // 9,
+                    "episode": ep, "seed": seed, "n9": game.n9_count,
                     "moves": game.moves, "cause": history[-1]["phase"],
                     "overflow_col": None,
                     "tail": history[-args.tail:],
@@ -200,7 +200,7 @@ def main():
                 jsonl.flush()
         elif history:
             reports.append(f"===== 局 {ep} seed={seed}: 达到 {args.max_moves} 步上限未死亡, "
-                           f"{game.score // 9} 个9 =====")
+                           f"{game.n9_count} 个9 =====")
 
     if jsonl:
         jsonl.close()

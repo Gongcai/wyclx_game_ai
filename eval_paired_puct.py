@@ -9,7 +9,7 @@ import time
 
 import torch
 
-from agents.dist import load_weights, make_sampler
+from agents.dist import load_weights, make_real_sampler, make_sampler
 from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
 from agents.puct import PuctTree, advance_tree, puct_search
 from game import Game
@@ -49,7 +49,8 @@ def parse_models(items):
 
 def load_model(path, device):
     checkpoint = torch.load(path, weights_only=True, map_location=device)
-    net = PolicyValueNet(hidden=hidden_from_checkpoint(checkpoint),
+    net = PolicyValueNet(
+        hidden=hidden_from_checkpoint(checkpoint),
         value_outputs=checkpoint.get("value_outputs", 2),
         afterstate_q=checkpoint.get("afterstate_q", False),
         history_features=checkpoint.get("history_features", False),
@@ -168,7 +169,11 @@ def main():
         label: (*load_model(path, args.device), path)
         for label, path in model_specs
     }
-    weights, capped = load_weights(args.dist)
+    if args.dist == "real":
+        drop_sampler = make_real_sampler()
+    else:
+        weights, capped = load_weights(args.dist)
+        drop_sampler = make_sampler(weights, capped)
     total = args.episodes * len(model_specs)
     new_count = 0
     for episode_id in range(args.episodes):
@@ -179,7 +184,7 @@ def main():
             net, gamma, _model_path = loaded[label]
             game = Game(
                 rng=random.Random(seed),
-                drop_sampler=make_sampler(weights, capped),
+                drop_sampler=drop_sampler,
             )
             started = time.time()
             n9_steps = []

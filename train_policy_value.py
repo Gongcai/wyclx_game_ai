@@ -172,7 +172,7 @@ def metrics(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--demos", nargs="+", required=True)
-    ap.add_argument("--hidden", type=int, default=128, help="网络宽度（8卡平台可加大到 256/512）")
+    ap.add_argument("--hidden", type=int, default=128, help="网络宽度（容量测试可加大）")
     ap.add_argument("--out", default=None)
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch", type=int, default=256)

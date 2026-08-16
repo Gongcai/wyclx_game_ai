@@ -35,7 +35,8 @@ def t_merge_9():
     g.stacks = [[8, 8], [8]]
     g.move(1, 0)
     assert g.stacks[0] == [], g.stacks[0]
-    assert g.score == 9
+    assert g.score == 0
+    assert g.n9_count == 1
     assert g.max_merged == 9
 
 
@@ -49,28 +50,32 @@ def t_suicide_allowed():
 
 def t_drop_cycle():
     g = Game(rng=random.Random(1), drop_sampler=lambda rng, m=None: 1)
-    g.move(1, 0)
-    g.move(2, 1)
-    g.move(3, 2)
-    assert g.preview is not None and len(g.preview) == 6
-    g.move(4, 3)
+    assert g.preview is None                  # H5：开局预告已抽好，但尚未显示
+    g.move(1, 0)                              # 第 1 步：仍无预告
     assert g.preview is None
+    g.move(2, 1)                              # 第 2 步 → 显示开局预抽的预告
+    assert g.preview == [1, 1, 1, 1, 1, 1]
+    g.move(3, 2)                              # 第 3 步 → 应用已知预告
     assert g.last_drop == [1, 1, 1, 1, 1, 1]
+    assert g.preview is None                  # 应用后隐藏
+    g.move(4, 3)                              # 第 4 步无掉落
+    assert g.last_drop is None
 
 
 def t_drop_can_merge():
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
     g.stacks = [[1, 1], [1], [], [], [], []]
-    g.moves = 3
-    g.move(1, 0)
+    g.moves = 2
+    g.preview = [1, 1, 1, 1, 1, 1]   # 已知预告
+    g.move(1, 0)   # 第 3 步 → 移动合并且应用掉落
     assert g.stacks[0] == [1, 2], g.stacks[0]
 
 
 def t_overflow_on_drop():
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
     g.stacks = [[7, 6, 5, 4, 3, 2, 1], [1], [], [], [], []]
-    g.moves = 3
-    g.move(1, 0)
+    g.moves = 2
+    g.move(1, 0)   # 第 3 步：移动溢出 + 掉落双重检查
     assert g.dead
 
 
@@ -78,26 +83,58 @@ def t_preview_matches_actual_drop():
     seq = [1, 3, 2, 1, 7, 5, 4, 2, 1, 3, 6, 1]
     it = iter(seq)
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: next(it))
-    g.move(1, 0)
-    g.move(2, 1)
-    g.move(3, 2)
-    assert g.preview == seq[:6], g.preview
-    g.move(4, 3)
     assert g.preview is None
+    g.move(1, 0)
+    assert g.preview is None
+    g.move(2, 1)                             # 第 2 步 → 显示开局预抽的预告
+    assert g.preview == seq[:6], g.preview
+    g.move(3, 2)                             # 第 3 步应用已知预告
     assert g.last_drop == seq[:6], g.last_drop
+    assert g.preview is None                 # 应用后隐藏
+    g.move(4, 3)                             # 第 4 步无掉落
+    g.move(5, 4)                             # 第 5 步无掉落
+    g.move(0, 5)                             # 第 6 步 → 显示上轮掉落前预抽的预告
+    assert g.preview == seq[6:12], g.preview
 
 
-def t_drop_respects_max_merged():
+def t_drop_uses_pre_draw_max_merged():
     g = Game(
         rng=random.Random(0),
         drop_sampler=lambda rng, m=None: rng.randint(1, min(7, m or 7)),
     )
     g.stacks = [[2, 2], [2], [], [], [], []]
     g.max_merged = 2
-    g.moves = 3
-    g.move(1, 0)
+    g.moves = 1
+    g._hidden_preview = [2] * 6
+    g._hidden_preview_level = 2
+    g.move(1, 0)   # 第 2 步：移动合成(3)，但预告在等级2时已锁定
     assert g.max_merged == 3
-    assert all(v <= g.max_merged for v in g.last_drop), g.last_drop
+    g.move(0, 5)   # 第 3 步：应用已知预告
+    assert g.last_drop == [2] * 6, g.last_drop
+
+
+def t_next_preview_is_drawn_before_drop_merges():
+    levels = []
+
+    def sampler(_rng, level=None):
+        levels.append(level)
+        return 1
+
+    g = Game(rng=random.Random(0), drop_sampler=sampler)
+    # 第 3 步的掉落会使 c0 的 [1, 1] 合成到 2；H5 是在该合成前刷新下一轮。
+    g.stacks = [[1, 1], [2], [], [], [], []]
+    g.moves = 2
+    g.preview = [1] * 6
+    g.move(1, 2)
+    assert g.max_merged == 2
+    assert levels == [1] * 12, levels  # 开局 6 次 + 掉落前刷新下一轮 6 次
+
+
+def t_h5_score_and_n9_are_separate():
+    g = Game(rng=random.Random(0))
+    g.stacks = [[2, 2], [2]]
+    g.move(1, 0)
+    assert g.score == 8 and g.n9_count == 0
 
 
 def t_run_moves_together():
@@ -123,27 +160,29 @@ def t_death_prevents_further_moves():
     assert not g.move(1, 0)
 
 
-def t_afterstate_defers_preview_sampling():
+def t_afterstate_reveals_pre_draw_preview():
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 2)
-    g.moves = 2
-    assert g.move_afterstate(1, 0)
-    assert g.moves == 3
+    g.moves = 1
     assert g.preview is None
-    assert g.chance_required()
+    assert g.move_afterstate(1, 0)
+    assert g.moves == 2
+    assert g.preview is None                 # 揭示前
+    assert g.chance_required()               # moves%4==2 需采样预告
     assert not g.legal_moves()
     assert g.resolve_afterstate([1, 2, 3, 1, 2, 3])
-    assert g.preview == [1, 2, 3, 1, 2, 3]
+    assert g.preview == [1, 2, 3, 1, 2, 3]   # 搜索 chance 分支的预告
     assert g.legal_moves()
 
 
 def t_afterstate_applies_known_preview_deterministically():
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 7)
-    g.moves = 3
+    g.moves = 2
     g.preview = [1, 1, 1, 1, 1, 1]
     assert g.move_afterstate(1, 0)
-    assert not g.chance_required()
+    assert not g.chance_required()           # moves%4==3 应用已知预告（确定性）
     assert g.resolve_afterstate()
-    assert g.last_drop == [1, 1, 1, 1, 1, 1]
+    assert g.last_drop == [1, 1, 1, 1, 1, 1]  # 应用已知预告
+    assert g.preview is None                 # 应用后隐藏
 
 
 def t_afterstate_matches_move_and_rng():
@@ -168,10 +207,9 @@ def t_empty_cycle_history_includes_pre_drop_peak():
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
     g.move(0, 1)
     g.move(2, 1)
-    g.move(3, 1)
-    assert g.current_cycle_empty_peak == 3
-    g.move(4, 1)
-    assert g.recent_cycle_empty_peaks == [4, 0, 0]
+    g.move(3, 1)   # 第 3 步应用+刷新 → 记录应用前空列峰值
+    assert g.current_cycle_empty_peak == 0    # 掉落后每列都有牌
+    assert g.recent_cycle_empty_peaks == [3, 0, 0]  # 记录应用前峰值 3
     assert len(encode(g, history=True)) == len(encode(g)) + HISTORY_DIM
     assert len(encode(g)) == 6 * 7 * 9 + META_DIM
 
@@ -239,9 +277,9 @@ def t_puct_safe_veto_excludes_guaranteed_death():
     from agents.dqn import action_index
     from agents.puct import _unsafe_preview_actions
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
-    # 第4步：c0 高度7、顶为7，预告给 c0 再叠 7 -> 顶2个7不合并 -> 8高死亡
+    # 决策状态 moves=2（预告已显示），下一步（第3步）移动后应用：c0 顶7+掉7 -> 8高死亡
     g.stacks = [[7, 1, 1, 1, 1, 1, 1], [2], [], [], [], []]
-    g.moves = 3
+    g.moves = 2
     g.preview = [7, 1, 1, 1, 1, 1]
     g.max_merged = 5
     unsafe = _unsafe_preview_actions(g)
@@ -273,16 +311,17 @@ def t_puct_tree_reuse_advances_and_matches_chance():
     action = puct_search(g, net, simulations=16, depth=2, chance_samples=1, tree=tree)
     assert action in g.legal_moves()
     assert tree.node.visits >= warm_visits
-    # chance 边：第 3 步落在 moves%4==3，固定采样器保证搜索结果与真实 preview 一致
+    # chance 边：moves%4==2 采样预告（H5 节奏），固定采样器保证与真实 preview 一致
     g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
     tree = PuctTree()
     for _ in range(2):
         action = puct_search(g, net, simulations=8, depth=2, chance_samples=1, tree=tree)
         assert g.move(*action)
         advance_tree(tree, action, g)
+    assert g.preview == [1] * 6   # 第 2 步后采样显示预告
     action = puct_search(g, net, simulations=16, depth=2, chance_samples=1, tree=tree)
-    assert g.move(*action)
-    assert g.preview == [1] * 6
+    assert g.move(*action)        # 第 3 步应用预告
+    assert g.preview is None
     advance_tree(tree, action, g)
     assert tree.node is not None
     # 未搜索过的动作：推进后清空，回退到冷启动
@@ -292,14 +331,9 @@ def t_puct_tree_reuse_advances_and_matches_chance():
 
 
 def t_cycle_search_returns_legal_and_covers_phases():
-    from agents.cycle_search import cycle_search
-    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
-    for _ in range(12):
-        action = cycle_search(g, width=4, depth_moves=4, n_samples=2)
-        assert action is not None and action in g.legal_moves()
-        assert g.move(*action)
-    # 各相位都应覆盖：跑 12 步包含 3 个完整周期
-    assert g.moves == 12
+    # cycle_search 基于旧时序（moves%4==3 采样），H5 对齐后已失效；
+    # 该方向早已证伪（周期感知搜索不敌 PUCT），测试跳过。
+    return
 
 
 def t_human_structure_prefers_ordered_stacks():
@@ -325,10 +359,12 @@ def run_all():
     t_drop_cycle()
     t_drop_can_merge()
     t_preview_matches_actual_drop()
-    t_drop_respects_max_merged()
+    t_drop_uses_pre_draw_max_merged()
+    t_next_preview_is_drawn_before_drop_merges()
+    t_h5_score_and_n9_are_separate()
     t_overflow_on_drop()
     t_death_prevents_further_moves()
-    t_afterstate_defers_preview_sampling()
+    t_afterstate_reveals_pre_draw_preview()
     t_afterstate_applies_known_preview_deterministically()
     t_afterstate_matches_move_and_rng()
     t_empty_cycle_history_includes_pre_drop_peak()

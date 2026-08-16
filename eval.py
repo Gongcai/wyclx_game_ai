@@ -2,7 +2,7 @@ import argparse
 import random
 
 from agents.baselines import play
-from agents.dist import load_weights, make_sampler
+from agents.dist import load_weights, make_sampler, make_real_sampler
 from agents.dqn import DQN, encode, index_action, legal_mask
 from agents.search import beam_policy
 from game import Game
@@ -30,7 +30,11 @@ def main():
     if not policies or not set(policies) <= allowed:
         raise ValueError(f"policies 必须属于 {sorted(allowed)}")
 
-    weights, capped = load_weights(args.dist)
+    if args.dist == "real":
+        drop_sampler = make_real_sampler()
+    else:
+        weights, capped = load_weights(args.dist)
+        drop_sampler = make_sampler(weights, capped)
     base = random.Random(args.seed)
     agent = None
     if args.model:
@@ -45,7 +49,7 @@ def main():
         for i in range(args.n):
             g = Game(
                 rng=random.Random(base.randint(0, 2**31)),
-                drop_sampler=make_sampler(weights, capped),
+                drop_sampler=drop_sampler,
             )
             if policy == "agent":
                 while not g.dead:
@@ -63,10 +67,10 @@ def main():
                 play(g, policy)
             tot[0] += g.score
             tot[1] += g.moves
-            tot[2] += g.score // 9
+            tot[2] += g.n9_count
             tot[3] += g.max_merged
             tot[4] += sum(len(st) for st in g.stacks)
-            tot[5] += g.score > 0
+            tot[5] += g.n9_count > 0
         print(
             f"{policy:6s}  平均得分 {tot[0] / args.n:7.2f}  平均步数 {tot[1] / args.n:7.1f}"
             f"  平均合成9 {tot[2] / args.n:6.2f}  成功率 {tot[5] / args.n:5.1%}"

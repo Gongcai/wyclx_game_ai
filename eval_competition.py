@@ -11,7 +11,7 @@ import torch
 from agents.baselines import greedy_policy, random_policy
 from agents.cycle_search import cycle_search
 from agents.heuristic import HeuristicWeights, heuristic_policy_beam
-from agents.dist import load_weights, make_sampler
+from agents.dist import load_weights, make_sampler, make_real_sampler
 from agents.dqn import DQN, encode, index_action, legal_mask
 from agents.mcts import mcts_policy
 from agents.policy_value import PolicyValueNet, hidden_from_checkpoint
@@ -22,7 +22,7 @@ from game import Game
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--policy", choices=("agent", "beam", "mcts", "puct", "heuristic", "cycle", "greedy", "random"), default="agent")
+    ap.add_argument("--policy", choices=("agent", "beam", "mcts", "puct", "pv-greedy", "heuristic", "cycle", "greedy", "random"), default="agent")
     ap.add_argument("--model", default=None)
     ap.add_argument("--arch", choices=("mlp", "equivariant"), default="mlp")
     ap.add_argument("--dist", default="uniform")
@@ -74,12 +74,16 @@ def main():
 
     if args.policy == "agent" and not args.model:
         raise ValueError("agent 策略必须提供 --model")
-    if args.policy == "puct" and not args.pv_model:
-        raise ValueError("puct 策略必须提供 --pv-model")
-    weights, capped = load_weights(args.dist)
+    if args.policy in ("puct", "pv-greedy") and not args.pv_model:
+        raise ValueError(f"{args.policy} 策略必须提供 --pv-model")
+    if args.dist == "real":
+        drop_sampler = make_real_sampler()
+    else:
+        weights, capped = load_weights(args.dist)
+        drop_sampler = make_sampler(weights, capped)
     game = Game(
         rng=random.Random(args.seed),
-        drop_sampler=make_sampler(weights, capped),
+        drop_sampler=drop_sampler,
         future_seed=args.foresee if args.foresee else None,
     )
     agent = None
@@ -88,9 +92,10 @@ def main():
     if args.policy == "agent":
         agent = DQN(device=args.device, arch=args.arch)
         agent.load(args.model)
-    elif args.policy == "puct":
+    elif args.policy in ("puct", "pv-greedy"):
         checkpoint = torch.load(args.pv_model, weights_only=True, map_location=args.device)
-        pv_net = PolicyValueNet(hidden=hidden_from_checkpoint(checkpoint),
+        pv_net = PolicyValueNet(
+            hidden=hidden_from_checkpoint(checkpoint),
             value_outputs=checkpoint.get("value_outputs", 2),
             afterstate_q=checkpoint.get("afterstate_q", False),
             history_features=checkpoint.get("history_features", False),
@@ -98,7 +103,7 @@ def main():
         pv_net.load_state_dict(checkpoint["model"])
         pv_net.eval()
         puct_gamma = args.puct_gamma if args.puct_gamma is not None else checkpoint.get("gamma", 0.99)
-    if args.puct_tree_reuse and args.puct_chance_samples <= 0:
+    if args.policy == "puct" and args.puct_tree_reuse and args.puct_chance_samples <= 0:
         raise ValueError("--puct-tree-reuse 需要 --puct-chance-samples > 0")
     puct_tree = PuctTree() if args.puct_tree_reuse else None
 
@@ -142,6 +147,13 @@ def main():
                 shape_low_w=args.puct_shape_low_w,
                 safe_veto=args.puct_safe_veto,
             )
+        elif args.policy == "pv-greedy":
+            with torch.no_grad():
+                policy = pv_net(
+                    encode(game, args.device, history=pv_net.history_features).unsqueeze(0)
+                )[0][0]
+            mask = legal_mask(game, args.device).bool()
+            action = index_action(int(policy.masked_fill(~mask, float("-inf")).argmax()))
         elif args.policy == "heuristic":
             hw = HeuristicWeights(
                 gain=args.heur_gain, empty=args.heur_empty,
