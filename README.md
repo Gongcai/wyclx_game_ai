@@ -109,6 +109,10 @@ root_sequential_halving=8 root_q_scale=2.0 tree_reuse=true safe_veto=true`
 
 ## 6. 快速开始
 
+**模型下载**：推荐模型 `real-h5-puct-r2-pv.pt`（2.8 MB，自包含检查点）在
+[Release v1.0.0](https://github.com/Gongcai/wyclx_game_ai/releases/tag/v1.0.0)，
+放到 `runs/puct-v3/` 即可（或用 `--model` 指定路径）。
+
 ```bash
 python test_game.py                        # 规则自测（输出 all tests passed）
 python train.py --dist uniform             # DQN 基线
