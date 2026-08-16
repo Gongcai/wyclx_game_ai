@@ -119,6 +119,15 @@ python eval_paired_puct.py --models A=... B=...  # 配对评测
 
 环境：Python 3.12 + torch（cu130），依赖位于 `.venv/`，详见 `AGENTS.md`。
 
+### 训练环境说明
+
+本项目在 **Arch Linux** 上完成训练与全部实验（Hyprland/Wayland 桌面，
+NVIDIA GPU + CUDA）。其中**实机画面采集与指导链路**（`game_advisor.py`
+等）依赖 Linux 桌面特性：游戏本体通过 **Steam Proton** 运行 Windows 客户端，
+抓屏走 Hyprland + `grim`，全局热键由 Hyprland 转发——这部分在
+Windows / macOS 上**不一定能复原**。训练、模拟器评测与网页版自动对战
+（`auto_play_h5.py`，仅需 Playwright）理论上跨平台，但未在其他系统上验证过。
+
 ## 版权说明
 
 本仓库**不包含**游戏的任何官方素材、源码或资源文件（版权归原版权方所有）。
