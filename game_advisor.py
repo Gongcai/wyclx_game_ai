@@ -65,7 +65,32 @@ class StateTracker:
                 matches.append(action)
         return matches
 
-    def update(self, flat, stacks, preview):
+    def explain_transition(self, stacks, max_moves=3, frontier_cap=3000):
+        """BFS 枚举 1..max_moves 步的合法序列解释盘面变化。
+
+        掉落那一拍的盘面变化是"一步移动 + 6 个掉落 + 级联合并"，且玩家可能
+        隔了几步才按一次 F8；单步解释会失败。sim.move 会在周期末按已记录的
+        预告应用掉落，因此跨掉落的序列也能精确模拟。返回最短 (步数, 动作)。
+        """
+        if self.previous_game is None:
+            return None
+        frontier = [self.previous_game]
+        for depth in range(1, max_moves + 1):
+            nxt = []
+            for game in frontier:
+                for action in game.legal_moves():
+                    sim = copy.deepcopy(game)
+                    if not sim.move(*action):
+                        continue
+                    if sim.stacks == stacks:
+                        return (depth, action)
+                    nxt.append(sim)
+            if len(nxt) > frontier_cap:
+                break
+            frontier = nxt
+        return None
+
+    def update(self, flat, stacks, preview, n_moves=0):
         changed = self.previous_flat is not None and flat != self.previous_flat
         if self.initial_board(stacks):
             self.reset()
@@ -73,8 +98,14 @@ class StateTracker:
         elif self.moves is None:
             # 中途接入时，有预告只能对应可决策相位 2；无预告无法单帧区分。
             self.moves = 2 if preview is not None else 0
-        elif changed:
-            self.moves += 1
+        else:
+            if n_moves > 0:
+                self.moves += n_moves
+            elif changed:
+                self.moves += 1
+            if preview is not None and self.moves % 4 != 2:
+                # 预告只在每轮第 2 步后可见：用它在任何一次按键上锚定相位。
+                self.moves += (2 - self.moves) % 4
 
         board_max = max((value for stack in stacks for value in stack), default=1)
         preview_max = max(preview, default=1) if preview else 1
@@ -251,23 +282,33 @@ def main():
             human_actions = []
         else:
             stacks = stacks_from_flat(flat)
-            human_actions = tracker.infer_human_actions(stacks)
             board_changed = (
                 tracker.previous_flat is not None and flat != tracker.previous_flat
             )
             is_reset = tracker.initial_board(stacks)
-            if board_changed and not is_reset and not human_actions:
-                print_advice(
-                    flat, stacks, preview, tracker, None, recognize_ms, 0.0,
-                    "盘面变化无法由一个合法动作解释：可能仍在动画中，请稍后重按热键",
-                    args.global_key, human_actions=[],
-                )
+            human_actions = (
+                tracker.infer_human_actions(stacks)
+                if board_changed and not is_reset else []
+            )
+            explained = (1, human_actions[0]) if len(human_actions) == 1 else None
+            if explained is None and board_changed and not is_reset:
+                explained = tracker.explain_transition(stacks)
+            if board_changed and not is_reset and explained is None:
+                # 不再卡死：重同步到观测盘面继续给建议（相位靠预告在场与否
+                # 在 update 里锚定），并落诊断日志便于追因（预告误读/动画中间态）。
+                if warning is None:
+                    warning = ("盘面变化无法逐步解释（多为掉落/连合成动画或多步连下），"
+                               "已重同步、相位可能不准；建议异常时按 r 重置")
                 append_jsonl(args.trace, {
-                    "t": time.time(), "source": source, "status": "unstable",
+                    "t": time.time(), "source": source, "status": "resync",
                     "board": flat, "stacks": stacks, "preview": preview,
+                    "prev_board": tracker.previous_flat,
+                    "prev_moves": tracker.moves,
                 })
-                return
-            changed = tracker.update(flat, stacks, preview)
+                n_moves = 0
+            else:
+                n_moves = explained[0] if explained else 0
+            changed = tracker.update(flat, stacks, preview, n_moves=n_moves)
             game = tracker.make_game(stacks, preview)
             search_started = time.perf_counter()
             action = puct_search(
