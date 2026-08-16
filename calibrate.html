@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>棋盘标定器</title>
+<style>
+  body { font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif; background: #151522; color: #eae6f2; margin: 0; padding: 14px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  .top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .mode { display: inline-flex; border: 1px solid #333; border-radius: 8px; flex-wrap: wrap; }
+  .mode button { background: #22223a; color: #ccc; border: none; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  .mode button.on { background: #f59e0b; color: #111; font-weight: 700; }
+  .btn { background: #2a2a48; border: 1px solid #444; color: #eee; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .btn.primary { background: #f59e0b; color: #111; font-weight: 700; }
+  .hint { font-size: 12px; color: #9a94b0; margin: 4px 0 8px; line-height: 1.7; }
+  .wrap { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+  canvas { background: #000; border: 1px solid #333; border-radius: 6px; cursor: crosshair; max-width: 100%; }
+  .panel { background: #1c1c30; border: 1px solid #333; border-radius: 10px; padding: 12px; min-width: 260px; max-height: 640px; overflow: auto; }
+  .panel h3 { font-size: 13px; margin: 0 0 8px; color: #ffd75e; }
+  .samples { font-size: 12px; }
+  .srow { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .swatch { width: 26px; height: 26px; border-radius: 5px; border: 1px solid #555; display: inline-block; }
+  .srow .lv { width: 20px; font-weight: 700; }
+  .srow button { background: none; border: none; color: #f66; cursor: pointer; font-size: 12px; }
+  #status { font-size: 12px; color: #7ee787; margin-top: 8px; white-space: pre-wrap; }
+  .lvlbtn { margin: 2px; padding: 4px 8px; border-radius: 6px; border: 1px solid #555; background: #22223a; color: #ddd; cursor: pointer; font-size: 12px; }
+  .lvlbtn:active { background: #f59e0b; color: #111; }
+</style>
+</head>
+<body>
+<h1>🐰 棋盘标定器</h1>
+<div class="hint">步骤：① <b>棋盘框</b>：点此按钮拖拽画 6×7 棋盘（绿色）→ ② <b>预告框</b>：点此按钮拖拽画预告条（黄色，6 等分）；<b>两个框分开画，互不影响</b> → ② <b>预告点</b>：在预告条上<b>逐个点击</b>放置 6 个采样点（青色，可拖拽移动、右键删除；预告格与棋盘列不对齐也没关系，点自己定位置；预告框可画可不画）→ ③ <b>调中心点</b>：<b>默认拖拽=整体平移棋盘 42 点</b>（预告点独立，不受影响）；<b>Ctrl+拖</b>=只移动该点（预告点也可单独调）→ ④ <b>整格模板</b>：点牌面格子输 1-8（每级 1 个）+ 点空格输 0；<b>预告条识别不准时，在预告框内的牌上补采模板</b>（自动归为预告专用）→ ⑤ <b>预览识别</b> 检查 → ⑥ 保存</div>
+<div class="top">
+  <div class="mode" id="mode-switch">
+    <button data-m="board" class="on">棋盘框</button>
+    <button data-m="preview">预告框</button>
+    <button data-m="pvpts">预告点</button>
+    <button data-m="digits">整格模板</button>
+    <button data-m="adjust">调中心点</button>
+    <button data-m="sample">颜色采样</button>
+    <button data-m="preview2">预览识别</button>
+  </div>
+  <button class="btn" id="btn-clear">清空当前框</button>
+  <button class="btn" id="btn-reset-adj">重置中心偏移</button>
+  <button class="btn primary" id="btn-save">💾 保存配置</button>
+  <span class="hint" id="coord-hint">坐标: -</span>
+</div>
+<div class="wrap">
+  <canvas id="cv" width="800" height="500"></canvas>
+  <div class="panel">
+    <h3>数字模板预览（切到"数字模板"模式，点击数字后实时显示）</h3>
+    <canvas id="tplview" width="262" height="108" style="background:#000;border-radius:6px;margin-bottom:8px;width:100%"></canvas>
+    <h3>已采样本</h3>
+    <div class="samples" id="samples"></div>
+    <h3 style="margin-top:12px">快捷等级按钮（采样模式先点格子再点等级）</h3>
+    <div id="lvlbtns"></div>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const img = new Image();
+let imgW = 0, imgH = 0, scale = 1;
+let mode = "board";
+let board = null, preview = null;
+const samples = [];
+let pendingCell = null;
+const adjustments = {};
+const pvPoints = []; // 预告采样点 [{x, y}]，独立放置，不与棋盘列对齐
+const dtemplates = []; // 数字模板样本 {x, y, v, kind}（x,y=数字中心点击位置）
+
+let origData = null; // 原始图像像素（识别/采样只用它，不用绘制后的 canvas）
+img.onload = () => {
+  imgW = img.width; imgH = img.height;
+  const maxW = Math.max(600, window.innerWidth - 340);
+  scale = Math.min(maxW / imgW, (window.innerHeight - 140) / imgH, 1.2);
+  cv.width = Math.round(imgW * scale); cv.height = Math.round(imgH * scale);
+  const off = document.createElement("canvas");
+  off.width = imgW; off.height = imgH;
+  const octx = off.getContext("2d");
+  octx.drawImage(img, 0, 0);
+  origData = octx.getImageData(0, 0, imgW, imgH).data;
+  draw();
+  loadConfig();
+};
+img.src = "frame.png";
+
+let previewColors = null; // {v: [[r,g,b],...]} 预告元素专用颜色（手填/配置）
+// 读取已保存的标定配置，免重复标定
+async function loadConfig() {
+  try {
+    const res = await fetch("config");
+    if (!res.ok) { document.getElementById("status").textContent = "没有已保存的配置（configs/capture.json 不存在），请开始标定"; return; }
+    const cfg = await res.json();
+    const c = cfg.calib;
+    if (!c) { document.getElementById("status").textContent = "配置存在但没有 calib 标定信息（旧版配置），请重新标定"; return; }
+    if (c.board) board = c.board;
+    if (c.preview_box) preview = c.preview_box;
+    if (c.pv_points && c.pv_points.length) pvPoints.push(...c.pv_points.map(p => ({ x: p[0], y: p[1] })));
+    if (c.adjustments) for (const k in c.adjustments) adjustments[k] = c.adjustments[k];
+    if (c.dtemplates) for (const t of c.dtemplates) dtemplates.push({ c: t.c, r: t.r, v: t.v, kind: t.kind || "b" });
+    if (cfg.preview_colors) previewColors = cfg.preview_colors;
+    if (c.samples) for (const s of c.samples) {
+      const cc = pxColor(s.x, s.y);
+      samples.push({ cx: s.x, cy: s.y, r: cc[0], g: cc[1], b: cc[2], v: s.v, kind: s.kind || "b" });
+    }
+    renderSamples();
+    draw();
+    document.getElementById("status").textContent = "✅ 已加载配置 " + cfg.frame + "：棋盘框/预告框/中心点/模板 " + dtemplates.length + " 个/样本 " + samples.length + " 个，可直接预览或微调后保存";
+  } catch (e) {
+    document.getElementById("status").textContent = "加载配置失败: " + e;
+  }
+}
+
+function toImg(ev) {
+  const r = cv.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / scale, y: (ev.clientY - r.top) / scale };
+}
+function baseCenter(kind, c, r) {
+  if (kind === "b") {
+    const w = (board.x1 - board.x0) / 6, h = (board.y1 - board.y0) / 7;
+    return { x: board.x0 + w * (c + 0.5), y: board.y0 + h * (r + 0.5) };
+  }
+  const w = (preview.x1 - preview.x0) / 6;
+  return { x: preview.x0 + w * (c + 0.5), y: (preview.y0 + preview.y1) / 2 };
+}
+function cellCenter(c, r) {
+  const b = baseCenter("b", c, r), a = adjustments["b," + c + "," + r] || [0, 0];
+  return { x: b.x + a[0], y: b.y + a[1] };
+}
+function previewCenter(c) {
+  const a = adjustments["p," + c] || [0, 0];
+  if (pvPoints[c]) return { x: pvPoints[c].x + a[0], y: pvPoints[c].y + a[1] };
+  const b = baseCenter("p", c, 0);
+  return { x: b.x + a[0], y: b.y + a[1] };
+}
+function allCenterKeys() {
+  const keys = [];
+  if (board) for (let c = 0; c < 6; c++) for (let r = 0; r < 7; r++) keys.push(["b", c, r]);
+  if (preview) for (let c = 0; c < 6; c++) keys.push(["p", c, 0]);
+  return keys;
+}
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  const gridlines = (box, color, cols, rows) => {
+    if (!box) return;
+    const x0 = box.x0 * scale, y0 = box.y0 * scale, w = (box.x1 - box.x0) * scale, h = (box.y1 - box.y0) * scale;
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y0, w, h);
+    for (let c = 1; c < cols; c++) { ctx.beginPath(); ctx.moveTo(x0 + w * c / cols, y0); ctx.lineTo(x0 + w * c / cols, y0 + h); ctx.stroke(); }
+    for (let r = 1; r < rows; r++) { ctx.beginPath(); ctx.moveTo(x0, y0 + h * r / rows); ctx.lineTo(x0 + w, y0 + h * r / rows); ctx.stroke(); }
+  };
+  gridlines(board, "#3ddc55", 6, 7);
+  gridlines(preview, "#ffd75e", 6, 1);
+  if (mode === "adjust" || mode === "sample" || mode === "preview2") {
+    for (const k of allCenterKeys()) {
+      const p = k[0] === "b" ? cellCenter(k[1], k[2]) : previewCenter(k[1]);
+      const key = k[0] === "b" ? "b," + k[1] + "," + k[2] : "p," + k[1];
+      const adj = adjustments[key];
+      ctx.beginPath();
+      ctx.arc(p.x * scale, p.y * scale, adj ? 5 : 3.5, 0, 7);
+      ctx.fillStyle = adj ? "#ffd75e" : (mode === "adjust" ? "#3ddc55" : "rgba(255,255,255,.5)");
+      ctx.fill();
+    }
+  }
+  for (const s of samples) {
+    ctx.beginPath(); ctx.arc(s.cx * scale, s.cy * scale, 4, 0, 7);
+    ctx.fillStyle = s.kind === "p" ? "#7ee7ff" : "#ff5c5c"; ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "12px monospace";
+    ctx.fillText(String(s.v), s.cx * scale + 6, s.cy * scale - 4);
+  }
+  if (pendingCell && (mode === "digits" || mode === "sample")) {
+    ctx.beginPath(); ctx.arc(pendingCell.cx * scale, pendingCell.cy * scale, 14, 0, 7);
+    ctx.strokeStyle = "#ffd75e"; ctx.lineWidth = 3; ctx.stroke();
+  }
+  // 整格模板缩略图（RGB 原图）
+  if (mode === "digits" && dtemplates.length) {
+    const tv = document.getElementById("tplview");
+    const tctx = tv.getContext("2d");
+    const z = 2;
+    const perRow = Math.max(1, Math.floor(250 / (TPL_W * z + 6)));
+    tctx.clearRect(0, 0, tv.width, tv.height);
+    const drawRow = (list, color) => {
+      list.forEach((t, i) => {
+        const row = Math.floor(i / perRow), col = i % perRow;
+        const rect = t.kind === "p" ? previewRect(t.c) : cellRect(t.c, t.r);
+        const g = cellTemplate(rect.cx, rect.cy, rect.gw, rect.gh);
+        const bx = 4 + col * (TPL_W * z + 6), by = 4 + row * (TPL_H * z + 18);
+        tctx.fillStyle = "#8a8a8a";
+        tctx.fillRect(bx, by, TPL_W * z, TPL_H * z);
+        for (let ty = 0; ty < TPL_H; ty++) for (let tx = 0; tx < TPL_W; tx++) {
+          const k = (ty * TPL_W + tx) * 3;
+          tctx.fillStyle = "rgb(" + Math.round(g[k]) + "," + Math.round(g[k + 1]) + "," + Math.round(g[k + 2]) + ")";
+          tctx.fillRect(bx + tx * z, by + ty * z, z, z);
+        }
+        tctx.fillStyle = color; tctx.font = "bold 11px monospace";
+        tctx.fillText(String(t.v), bx + 2, by + TPL_H * z + 12);
+      });
+    };
+    const b = dtemplates.filter(t => t.kind !== "p"), p = dtemplates.filter(t => t.kind === "p");
+    drawRow(b, "#ffd75e");
+    if (p.length) drawRow(p, "#7ee7ff");
+  }
+  if (pvPoints.length && (mode === "pvpts" || mode === "sample" || mode === "preview2")) {
+    pvPoints.forEach((pt, i) => {
+      ctx.beginPath(); ctx.arc(pt.x * scale, pt.y * scale, 6, 0, 7);
+      ctx.strokeStyle = "#7ee7ff"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = "rgba(126,231,255,.25)"; ctx.fill();
+      ctx.fillStyle = "#7ee7ff"; ctx.font = "bold 12px monospace";
+      ctx.fillText(String(i + 1), pt.x * scale + 8, pt.y * scale - 6);
+    });
+  }
+  if (mode === "preview2" && board && !dtemplates.length && !samples.length) {
+    document.getElementById("status").textContent = "还没有任何样本！先切到「数字模板」模式，点击牌上的数字输入等级（1-8），每个等级采 1-2 个";
+  }
+  if (mode === "preview2" && board) {
+    const mark = (p, v, color) => {
+      if (v <= 0) return;
+      ctx.fillStyle = "rgba(0,0,0,.55)";
+      ctx.fillRect(p.x * scale - 12, p.y * scale - 12, 24, 24);
+      ctx.fillStyle = color;
+      ctx.font = "bold 15px monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(v), p.x * scale, p.y * scale);
+      ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
+    };
+    if (dtemplates.length) buildCellTpls();
+    let nRec = 0;
+    for (let c = 0; c < 6; c++) for (let r = 0; r < 7; r++) {
+      const p = cellCenter(c, r);
+      let v, s = 1;
+      if (dtemplates.length) { const res = classifyCell(c, r, "b"); v = res[0]; s = res[1]; }
+      else v = classify(p.x, p.y, "b");
+      if (v > 0) nRec++;
+      mark(p, v, s >= 0.7 ? "#7dff7d" : s >= 0.5 ? "#ffd75e" : "#ff8c5c");
+    }
+    if (preview) {
+      for (let c = 0; c < 6; c++) {
+        const p = previewCenter(c);
+        let v, s = 1;
+        if (dtemplates.length) { const res = classifyCell(c, 0, "p"); v = res[0]; s = res[1]; }
+        else v = classify(p.x, p.y, "p");
+        mark(p, v, s >= 0.7 ? "#7de7ff" : s >= 0.5 ? "#7ee7ff" : "#ff8c5c");
+      }
+    }
+    document.getElementById("status").textContent = dtemplates.length
+      ? "整格模板识别：棋盘 " + nRec + "/42 格，预告复用棋盘模板（青字）（绿=高置信 黄=中 红=低）"
+      : "没有模板（dtemplates=0）！请用「整格模板」模式点击牌面格子输入等级";
+  }
+}
+function pxColor(x, y) {
+  const xi = Math.max(0, Math.min(imgW - 1, Math.round(x)));
+  const yi = Math.max(0, Math.min(imgH - 1, Math.round(y)));
+  const i = (yi * imgW + xi) * 4;
+  return [origData[i], origData[i + 1], origData[i + 2]];
+}
+function classify(cx, cy, kind) {
+  const c = pxColor(cx, cy);
+  const pool = kind === "p" ? samples.filter(s => s.kind === "p") : samples.filter(s => s.kind !== "p");
+  if (pool.length === 0) return -1;
+  let best = -1, bd = 1e9;
+  for (const s of pool) {
+    const d = Math.sqrt((s.r - c[0]) ** 2 + (s.g - c[1]) ** 2 + (s.b - c[2]) ** 2);
+    if (d < bd) { bd = d; best = s.v; }
+  }
+  return best;
+}
+// ---- 整格模板匹配（归一化互相关，RGB 展平） ----
+const TPL_W = 48, TPL_H = 32;
+let cellTpls = null; // {b:{v:rgb[]}, p:{v:rgb[]}}
+function cellRect(c, r) {
+  const p = cellCenter(c, r);
+  return { cx: p.x, cy: p.y, gw: (board.x1 - board.x0) / 6, gh: (board.y1 - board.y0) / 7 };
+}
+function previewRect(c) {
+  const p = previewCenter(c);
+  return { cx: p.x, cy: p.y, gw: (preview.x1 - preview.x0) / 6, gh: (preview.y1 - preview.y0) };
+}
+function cellTemplate(cx, cy, gw, gh) {
+  const out = new Float64Array(TPL_W * TPL_H * 3);
+  let k = 0;
+  for (let ty = 0; ty < TPL_H; ty++) for (let tx = 0; tx < TPL_W; tx++) {
+    const x = Math.max(0, Math.min(imgW - 1, Math.round(cx + (tx + 0.5 - TPL_W / 2) * gw / TPL_W)));
+    const y = Math.max(0, Math.min(imgH - 1, Math.round(cy + (ty + 0.5 - TPL_H / 2) * gh / TPL_H)));
+    const i = (y * imgW + x) * 4;
+    out[k++] = origData[i]; out[k++] = origData[i + 1]; out[k++] = origData[i + 2];
+  }
+  return out;
+}
+function buildCellTpls() {
+  cellTpls = { b: {}, p: {} };
+  for (const t of dtemplates) {
+    const rect = t.kind === "p" ? previewRect(t.c) : cellRect(t.c, t.r);
+    cellTpls[t.kind][t.v] = cellTemplate(rect.cx, rect.cy, rect.gw, rect.gh);
+  }
+}
+function classifyCell(c, r, kind) {
+  // 预告专用颜色表（若有）：RGB 最近邻，比整格匹配对预告样式更稳
+  if (kind === "p" && previewColors && Object.keys(previewColors).length) {
+    const p = previewCenter(c);
+    const col = pxColor(p.x, p.y);
+    let best = -1, bd = 1e18;
+    for (const v in previewColors) {
+      for (const cc of previewColors[v]) {
+        const d = (cc[0] - col[0]) ** 2 + (cc[1] - col[1]) ** 2 + (cc[2] - col[2]) ** 2;
+        if (d < bd) { bd = d; best = +v; }
+      }
+    }
+    const s = Math.max(0, 1 - bd / (80 * 80));
+    return bd <= 80 * 80 ? [best, s] : [0, s];
+  }
+  // 整格模板：预告无独立模板时复用棋盘模板
+  const pool = (cellTpls && cellTpls[kind] && Object.keys(cellTpls[kind]).length)
+    ? cellTpls[kind] : (cellTpls && cellTpls.b);
+  if (!pool || Object.keys(pool).length === 0) return [0, 0];
+  const rect = kind === "p" ? previewRect(c) : cellRect(c, r);
+  const roi = cellTemplate(rect.cx, rect.cy, rect.gw, rect.gh);
+  let best = -1, bs = -0.9;
+  for (const v in pool) {
+    const s = ncorr(roi, pool[v]);
+    if (s > bs) { bs = s; best = +v; }
+  }
+  return bs > 0.45 ? [best, bs] : [0, bs];
+}
+function ncorr(a, b) {
+  const n = a.length;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i] - ma, y = b[i] - mb;
+    num += x * y; da += x * x; db += y * y;
+  }
+  return da === 0 || db === 0 ? 0 : num / Math.sqrt(da * db);
+}
+function cellOf(px, py) {
+  if (!board) return null;
+  const w = (board.x1 - board.x0) / 6, h = (board.y1 - board.y0) / 7;
+  const c = Math.floor((px - board.x0) / w), r = Math.floor((py - board.y0) / h);
+  if (c < 0 || c >= 6 || r < 0 || r >= 7) return null;
+  const p = cellCenter(c, r);
+  return { cx: p.x, cy: p.y, c, r };
+}
+let drag = null;
+let dragPt = null;
+let dragAll = null;
+function hitCenter(px, py) {
+  for (const k of allCenterKeys()) {
+    const p = k[0] === "b" ? cellCenter(k[1], k[2]) : previewCenter(k[1]);
+    if (Math.hypot(p.x - px, p.y - py) < 12 / scale) return { kind: k[0], c: k[1], r: k[2] };
+  }
+  return null;
+}
+let dragPv = -1, pvMoved = false;
+cv.addEventListener("contextmenu", (ev) => {
+  if (mode === "pvpts") {
+    ev.preventDefault();
+    const p = toImg(ev);
+    let bi = -1, bd = 1e9;
+    pvPoints.forEach((pt, i) => { const d = Math.hypot(pt.x - p.x, pt.y - p.y); if (d < bd) { bd = d; bi = i; } });
+    if (bi >= 0 && bd < 30 / scale) { pvPoints.splice(bi, 1); draw(); }
+  }
+});
+cv.addEventListener("mousedown", (ev) => {
+  const p = toImg(ev);
+  if (mode === "pvpts") {
+    for (let i = 0; i < pvPoints.length; i++) {
+      if (Math.hypot(pvPoints[i].x - p.x, pvPoints[i].y - p.y) < 14 / scale) { dragPv = i; pvMoved = false; return; }
+    }
+    return;
+  }
+  if (mode === "adjust") {
+    const hit = hitCenter(p.x, p.y);
+    if (hit) {
+      const key = hit.kind === "b" ? "b," + hit.c + "," + hit.r : "p," + hit.c;
+      const base = hit.kind === "b" ? baseCenter("b", hit.c, hit.r) : baseCenter("p", hit.c, 0);
+      const cur = hit.kind === "b" ? cellCenter(hit.c, hit.r) : previewCenter(hit.c);
+      if (ev.ctrlKey || ev.altKey) {
+        // Ctrl/Alt+拖：只移动该点
+        dragPt = { key, baseX: base.x, baseY: base.y, grabDX: cur.x - p.x, grabDY: cur.y - p.y };
+      } else {
+        // 默认：整体平移只作用于棋盘 42 点（预告点偏移独立，不受整体平移影响）
+        const baseAll = {};
+        for (const k of allCenterKeys()) {
+          if (k[0] !== "b") continue;
+          const kk = "b," + k[1] + "," + k[2];
+          baseAll[kk] = [...(adjustments[kk] || [0, 0])];
+        }
+        dragAll = { startX: p.x, startY: p.y, base: baseAll };
+      }
+      return;
+    }
+  }
+  if (mode === "board" || mode === "preview") {
+    drag = { start: p, cur: p };
+  }
+});
+cv.addEventListener("mousemove", (ev) => {
+  const p = toImg(ev);
+  document.getElementById("coord-hint").textContent = "坐标: " + Math.round(p.x) + "," + Math.round(p.y);
+  if (dragPv >= 0) {
+    pvPoints[dragPv] = { x: p.x, y: p.y };
+    pvMoved = true;
+    draw();
+    return;
+  }
+  if (dragPt) {
+    adjustments[dragPt.key] = [p.x + dragPt.grabDX - dragPt.baseX, p.y + dragPt.grabDY - dragPt.baseY];
+    draw();
+    return;
+  }
+  if (dragAll) {
+    const dx = p.x - dragAll.startX, dy = p.y - dragAll.startY;
+    for (const k of Object.keys(dragAll.base)) adjustments[k] = [dragAll.base[k][0] + dx, dragAll.base[k][1] + dy];
+    draw();
+    return;
+  }
+  if (!drag) return;
+  drag.cur = p;
+  const box = { x0: Math.min(drag.start.x, p.x), y0: Math.min(drag.start.y, p.y), x1: Math.max(drag.start.x, p.x), y1: Math.max(drag.start.y, p.y) };
+  // 棋盘框与预告框完全独立：各自模式只改各自的框
+  if (mode === "board") board = box;
+  else if (mode === "preview") { preview = box; pvPoints.length = 0; }
+  draw();
+});
+cv.addEventListener("mouseup", () => { drag = null; dragPt = null; dragAll = null; dragPv = -1; });
+function previewCellOf(px, py) {
+  if (!preview) return null;
+  const w = (preview.x1 - preview.x0) / 6;
+  const c = Math.floor((px - preview.x0) / w);
+  if (c < 0 || c >= 6 || py < preview.y0 || py > preview.y1) return null;
+  const p = previewCenter(c);
+  return { cx: p.x, cy: p.y, c };
+}
+cv.addEventListener("click", (ev) => {
+  if (mode === "pvpts" && !pvMoved) {
+    const p = toImg(ev);
+    if (pvPoints.length >= 6) {
+      document.getElementById("status").textContent = "已有 6 个预告点：拖拽青色点=移动，右键=删除";
+      return;
+    }
+    pvPoints.push({ x: p.x, y: p.y });
+    document.getElementById("status").textContent = "预告点 " + pvPoints.length + "/6（点击继续放置，拖拽移动，右键删除）";
+    draw();
+    return;
+  }
+  pvMoved = false;
+  if (mode === "digits") {
+    const p = toImg(ev);
+    // 预告框内 → 预告模板（kind=p）；预告点附近 → 预告；否则棋盘格子
+    let kind = "b", pc = -1, cell = null;
+    const pcell = previewCellOf(p.x, p.y);
+    if (pcell) { kind = "p"; pc = pcell.c; }
+    else {
+      for (let i = 0; i < pvPoints.length; i++) {
+        if (Math.hypot(pvPoints[i].x - p.x, pvPoints[i].y - p.y) < 40 / scale) { kind = "p"; pc = i; break; }
+      }
+    }
+    if (kind === "b") cell = cellOf(p.x, p.y);
+    if (kind === "b" && !cell) {
+      document.getElementById("status").textContent = "点击位置不在棋盘/预告框内，请点击牌面格子（任意位置）";
+      return;
+    }
+    pendingCell = { kind, c: kind === "p" ? pc : cell.c, r: kind === "p" ? 0 : cell.r,
+                    cx: kind === "p" ? previewCenter(pc).x : cell.cx, cy: kind === "p" ? previewCenter(pc).y : cell.cy };
+    draw();
+    const v = prompt((kind === "p" ? "[预告] " : "[棋盘] ") + "这格是几级？（1-8=等级，0=空/背景）");
+    if (v !== null && v.trim() !== "" && !isNaN(v)) {
+      const n = parseInt(v);
+      if (n >= 0 && n <= 8) { addSample(n); return; }
+    }
+    pendingCell = null;
+    draw();
+    return;
+  }
+  if (mode === "sample") {
+    const p = toImg(ev);
+    const pcell = previewCellOf(p.x, p.y);
+    const cell = pcell ? null : cellOf(p.x, p.y);
+    let sx, sy, kind;
+    if (pcell) { sx = pcell.cx; sy = pcell.cy; kind = "p"; }
+    else if (cell) { sx = cell.cx; sy = cell.cy; kind = "b"; }
+    else { sx = p.x; sy = p.y; kind = "b"; }
+    const cc = pxColor(sx, sy);
+    pendingCell = { cx: sx, cy: sy, r: cc[0], g: cc[1], b: cc[2], kind };
+    document.getElementById("status").textContent = (kind === "p" ? "[预告] " : "[棋盘] ") + "待定级: (" + Math.round(sx) + "," + Math.round(sy) + ") 颜色 RGB(" + cc.join(",") + ") — 点等级按钮或按 0-8";
+  }
+});
+function addSample(v) {
+  if (!pendingCell) { alert("先在图上点击一个格子/位置"); return; }
+  if (mode === "digits") {
+    dtemplates.push({ kind: pendingCell.kind, c: pendingCell.c, r: pendingCell.r, v: Number(v) });
+    pendingCell = null;
+    const b = dtemplates.filter(s => s.kind !== "p").length, p = dtemplates.filter(s => s.kind === "p").length;
+    document.getElementById("status").textContent = "整格模板 " + dtemplates.length + " 个（棋盘 " + b + " / 预告 " + p + "）— 每个等级采 1-2 个，点下一张牌";
+    renderSamples(); draw();
+    return;
+  }
+  samples.push({ ...pendingCell, v: Number(v), kind: pendingCell.kind || "b" });
+  pendingCell = null;
+  document.getElementById("status").textContent = "已采 " + samples.length + " 个样本（棋盘 " + samples.filter(s => s.kind !== "p").length + " / 预告 " + samples.filter(s => s.kind === "p").length + "）";
+  renderSamples(); draw();
+}
+function renderSamples() {
+  const el = document.getElementById("samples");
+  const all = [...samples.map(s => ({ ...s, i: "c" + s.cx + s.cy })), ...dtemplates.map(s => ({ ...s, i: "d" + s.c + s.r + s.kind }))];
+  el.innerHTML = all.map((s, i) => '<div class="srow"><span class="swatch" style="background:rgb(' + s.r + ',' + s.g + ',' + s.b + ')"></span><span class="lv">' + (s.kind === "p" ? "预" : "") + s.v + '</span>(' + Math.round(s.cx) + ',' + Math.round(s.cy) + ') <button onclick="delSample2(' + i + ')">✕</button></div>').join("");
+  window._allSamples = all;
+}
+window.delSample = (i) => { samples.splice(i, 1); renderSamples(); draw(); };
+window.delSample2 = (i) => {
+  const a = window._allSamples[i];
+  if (a && a.i.startsWith("d")) {
+    const j = dtemplates.findIndex(t => t.c === a.c && t.r === a.r && t.kind === a.kind);
+    if (j >= 0) dtemplates.splice(j, 1);
+  } else if (a && a.i.startsWith("c")) {
+    const j = samples.findIndex(t => t.cx === a.cx && t.cy === a.cy);
+    if (j >= 0) samples.splice(j, 1);
+  }
+  renderSamples(); draw();
+};
+document.querySelectorAll("#mode-switch button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("#mode-switch button").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); mode = b.dataset.m; draw();
+}));
+document.getElementById("btn-clear").addEventListener("click", () => { if (mode === "board") board = null; else if (mode === "preview") preview = null; draw(); });
+document.getElementById("btn-reset-adj").addEventListener("click", () => { for (const k of Object.keys(adjustments)) delete adjustments[k]; draw(); });
+// 调中心点模式提示
+document.querySelector('[data-m="adjust"]').addEventListener("click", () => {
+  document.getElementById("status").textContent = "调中心点：拖拽绿点=整体平移棋盘 42 点（预告点独立不动）；Ctrl/Alt+拖=只移该点（预告点也可单独调）；黄点=已调整";
+});
+document.querySelector('[data-m="pvpts"]').addEventListener("click", () => {
+  document.getElementById("status").textContent = "预告点 " + pvPoints.length + "/6：在预告条上点击放置采样点；拖拽已有点=移动；右键=删除";
+});
+document.querySelector('[data-m="digits"]').addEventListener("click", () => {
+  document.getElementById("status").textContent = "整格模板 " + dtemplates.length + "：点棋盘牌面输 1-8（每级 1 个）+ 点空格输 0；预告不准时点预告框内的牌补采（自动预告专用）";
+});
+document.getElementById("btn-save").addEventListener("click", async () => {
+  if (!board) { alert("请先画棋盘框"); return; }
+  const res = await fetch("save", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ board, preview: preview ? { ...preview, points: pvPoints.map((p, i) => {
+        const a = adjustments["p," + i] || [0, 0];
+        return [Math.round(p.x + a[0]), Math.round(p.y + a[1])];
+      }) } : preview,
+      samples: samples.map(s => ({ x: s.cx, y: s.cy, v: s.v, kind: s.kind || "b" })),
+      dtemplates: dtemplates.map(s => ({ c: s.c, r: s.r, v: s.v, kind: s.kind || "b" })), adjustments }) });
+  const j = await res.json();
+  document.getElementById("status").textContent = j.ok ? "✅ 已保存: " + j.path : "❌ " + j.error;
+});
+const lvbox = document.getElementById("lvlbtns");
+for (let v = 0; v <= 8; v++) {
+  const b = document.createElement("button");
+  b.className = "lvlbtn"; b.textContent = v === 0 ? "背景(0)" : "级" + v;
+  b.addEventListener("click", () => addSample(v));
+  lvbox.appendChild(b);
+}
+document.addEventListener("keydown", (e) => {
+  const n = parseInt(e.key);
+  if (n >= 0 && n <= 8 && (mode === "sample" || mode === "digits")) addSample(n);
+});
+</script>
+</body>
+</html>
