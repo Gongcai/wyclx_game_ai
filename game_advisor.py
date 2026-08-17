@@ -32,6 +32,7 @@ from verify_capture import (
 
 
 DEFAULT_MODEL = "runs/puct-v3/real-h5-puct-r2-pv.pt"
+AUTO_PREVIEW = object()
 
 
 class StateTracker:
@@ -157,6 +158,22 @@ def stacks_from_flat(flat):
     ]
 
 
+def parse_preview_override(text):
+    """解析人工预告：六个 1~7，或 0 表示强制无预告。"""
+    text = text.strip()
+    if text.lower() in {"0", "none"} or text == "无":
+        return None
+    compact = text.replace(",", " ").replace("，", " ").split()
+    if len(compact) == 1 and len(compact[0]) == 6:
+        compact = list(compact[0])
+    if len(compact) != 6 or any(not item.isdigit() for item in compact):
+        raise ValueError("请输入六个 1~7，例如 312111；输入 0 表示无预告")
+    values = [int(item) for item in compact]
+    if any(value < 1 or value > 7 for value in values):
+        raise ValueError("预告值只能是 1~7")
+    return values
+
+
 def append_jsonl(path, event):
     if not path:
         return
@@ -195,8 +212,9 @@ def unregister_global_key(key):
 def print_advice(flat, stacks, preview, tracker, action, recognize_ms, search_ms,
                  warning, hotkey, human_actions=None):
     print(CLEAR, end="")
+    phase = tracker.moves % 4 if tracker.moves is not None else "未知"
     print(
-        f"回合状态: moves={tracker.moves} phase={tracker.moves % 4} "
+        f"回合状态: moves={tracker.moves} phase={phase} "
         f"历史最高={tracker.max_merged}  识别={recognize_ms:.1f}ms "
         f"搜索={search_ms:.1f}ms"
     )
@@ -221,7 +239,7 @@ def print_advice(flat, stacks, preview, tracker, action, recognize_ms, search_ms
         print(f"           {action[0] + 1}  →  {action[1] + 1}")
     print()
     print(f"游戏保持焦点，按 {hotkey} 截图并获取下一条建议。")
-    print("终端内按 r 重置回合计数，按 q 退出。")
+    print("终端内按 p 手动覆盖本次预告，按 r 重置回合计数，按 q 退出。")
     sys.stdout.flush()
 
 
@@ -252,7 +270,7 @@ def main():
     net, gamma = load_model(args.model, args.device)
     tracker = StateTracker(args.start_moves, args.max_merged)
 
-    def advise():
+    def advise(preview_override=AUTO_PREVIEW):
         if args.frame:
             image = cv2.imread(args.frame)
             source = args.frame
@@ -265,17 +283,25 @@ def main():
             cv2.imwrite(args.save, image)
         started = time.perf_counter()
         flat = recognizer.board(image)
-        preview = recognizer.preview_values(
+        recognized_preview = recognizer.preview_values(
             image, background=background,
             presence_threshold=args.preview_threshold,
+        )
+        preview = (
+            recognized_preview if preview_override is AUTO_PREVIEW
+            else preview_override
         )
         recognize_ms = (time.perf_counter() - started) * 1000
         warning = None
         height, width = image.shape[:2]
         if expected_size and (width, height) != expected_size:
             warning = f"截图尺寸 {width}×{height} 与标定尺寸 {expected_size} 不同"
+        if preview_override is not AUTO_PREVIEW:
+            manual = f"预告已人工覆盖（自动识别: {recognized_preview}）"
+            warning = f"{warning}；{manual}" if warning else manual
         if any(value < 0 for value in flat) or (preview and any(value < 0 for value in preview)):
-            warning = "存在未识别格，已拒绝给出建议"
+            unknown = "存在未识别格，已拒绝给出建议"
+            warning = f"{warning}；{unknown}" if warning else unknown
             action = None
             stacks = stacks_from_flat(flat)
             search_ms = 0.0
@@ -321,6 +347,8 @@ def main():
                 "t": time.time(), "source": source, "moves": tracker.moves,
                 "phase": tracker.moves % 4, "changed": changed,
                 "board": flat, "stacks": stacks, "preview": preview,
+                "recognized_preview": recognized_preview,
+                "manual_preview": preview_override is not AUTO_PREVIEW,
                 "max_merged": tracker.max_merged,
                 "human_action": list(human_actions[0]) if len(human_actions) == 1 else None,
                 "human_action_candidates": [list(item) for item in human_actions],
@@ -351,7 +379,7 @@ def main():
         print(CLEAR, end="")
         print(f"人工 AI 指导器已启动，模型: {args.model}")
         print(f"游戏保持焦点，按全局 {args.global_key} 截图并获取建议。")
-        print("终端内按空格也可截图，按 r 重置，按 q 退出。")
+        print("终端内按空格截图，按 p 手动覆盖预告，按 r 重置，按 q 退出。")
         sys.stdout.flush()
         while True:
             if requested.is_set():
@@ -368,6 +396,18 @@ def main():
                 break
             if key == b" ":
                 requested.set()
+            elif key in (b"p", b"P"):
+                termios.tcsetattr(fd, termios.TCSADRAIN, previous_terminal)
+                try:
+                    raw = input("\n输入六位预告（如 312111；0=无；直接回车取消）: ")
+                finally:
+                    tty.setcbreak(fd)
+                if raw.strip():
+                    try:
+                        override = parse_preview_override(raw)
+                        advise(preview_override=override)
+                    except Exception as exc:
+                        print(CLEAR + f"人工预告失败: {exc}", flush=True)
             elif key in (b"r", b"R"):
                 tracker.reset()
                 print(CLEAR + "回合计数已重置。按 F8 截取新对局初始盘面。", flush=True)

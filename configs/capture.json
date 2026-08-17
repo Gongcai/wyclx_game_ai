@@ -4,6 +4,7 @@
   "class": "steam_app_4277773963"
  },
  "frame": "runs/records/board-frame.png",
+ "preview_template_dir": "preview",
  "frame_size": [
   2131,
   1196

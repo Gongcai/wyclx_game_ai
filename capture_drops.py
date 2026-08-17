@@ -19,6 +19,7 @@ Ctrl+C 正常退出（已落盘数据不丢）。
 import argparse
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -81,9 +82,15 @@ class Recognizer:
         self.has_preview_templates = False
         self.tpl_gw = self.tpl_gh = 0.0
         self.tpl_pgw = self.tpl_pgh = 0.0
+        self.preview_cell_templates = {}
+        self.preview_bg_lab = None
+        self.board_subject_templates = {}
+        self.board_bg_lab = None
         if self.tpl:
             self.tw, self.th = self.tpl["size"]
-            for k, items in (("b", self.tpl["items_b"]), ("p", self.tpl.get("items_p") or {})):
+            preview_items = self.tpl.get("items_p") or {}
+            self.has_preview_templates = bool(preview_items)
+            for k, items in (("b", self.tpl["items_b"]), ("p", preview_items)):
                 self.tpl_items[k] = {
                     int(v): np.array(g, dtype=np.float32).reshape(self.th, self.tw, 3)
                     for v, g in items.items()}
@@ -92,7 +99,6 @@ class Recognizer:
                 # 对亮度衰减免疫：没有专用预告模板时直接复用棋盘模板，
                 # 远比单点颜色最近邻稳（2/3 两个米棕色仅差 ~30 色阶）。
                 self.tpl_items["p"] = self.tpl_items["b"]
-            self.has_preview_templates = bool(self.tpl_items["p"])
             c = self.tpl.get("cell", {})
             self.tpl_gw, self.tpl_gh = c.get("gw", 0.0), c.get("gh", 0.0)
             self.tpl_pgw, self.tpl_pgh = c.get("pv_gw", 0.0), c.get("pv_gh", 0.0)
@@ -119,6 +125,166 @@ class Recognizer:
                 a = a - a.mean()
                 self._tpl_rabbit_norm[int(v)] = a
                 self._tpl_rabbit_sq[int(v)] = float((a * a).sum())
+            self._load_board_subject_templates()
+        self._load_preview_cell_templates(cfg.get("preview_template_dir"))
+
+    def _load_board_subject_templates(self):
+        """从棋盘 0 级模板估计底色，建立只看牌面主体的模板。"""
+        if not self.tpl_items.get("b") or 0 not in self.tpl_items["b"]:
+            return
+        empty_rgb = self.tpl_items["b"][0].astype(np.uint8)
+        empty_bgr = empty_rgb.reshape(self.th, self.tw, 3)[:, :, ::-1]
+        empty_lab = cv2.cvtColor(empty_bgr, cv2.COLOR_BGR2LAB).reshape(-1, 3)
+        self.board_bg_lab = np.median(empty_lab, axis=0).astype(np.float32)
+        for value, item in self.tpl_items["b"].items():
+            if value == 0:
+                continue
+            image = item.astype(np.uint8).reshape(self.th, self.tw, 3)[:, :, ::-1]
+            feature, _area_ratio = self._board_subject_feature(image)
+            if feature is not None:
+                self.board_subject_templates[value] = feature
+        if any(value not in self.board_subject_templates for value in range(1, 9)):
+            self.board_subject_templates = {}
+
+    def _board_subject_feature(self, image):
+        """提取棋盘牌面主体，忽略格子底色和小范围动画噪声。"""
+        if image is None or image.size == 0 or self.board_bg_lab is None:
+            return None, 0.0
+        blurred = cv2.GaussianBlur(image, (3, 3), 0)
+        lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB).astype(np.float32)
+        distance = np.linalg.norm(lab - self.board_bg_lab, axis=2)
+        mask = (distance > 7.0).astype(np.uint8) * 255
+        mask[:1] = mask[-1:] = 0
+        mask[:, :1] = mask[:, -1:] = 0
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        if count <= 1:
+            return None, 0.0
+        pick = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        x, y, width, height, area = stats[pick]
+        area_ratio = float(area) / float(image.shape[0] * image.shape[1])
+        if area < 100 or area_ratio < 0.06:
+            return None, area_ratio
+        subject_mask = (labels[y:y + height, x:x + width] == pick).astype(np.float32)
+        subject = lab[y:y + height, x:x + width] - self.board_bg_lab
+        subject *= subject_mask[:, :, None]
+        subject = cv2.resize(subject, (48, 48)).ravel()
+        subject_mask = cv2.resize(subject_mask, (48, 48)).ravel() * 20.0
+        feature = np.concatenate((subject, subject_mask))
+        norm = float(np.linalg.norm(feature))
+        return (feature / norm if norm > 0 else None), area_ratio
+
+    def _classify_board_subject(self, image):
+        feature, _area_ratio = self._board_subject_feature(image)
+        if feature is None:
+            return 0
+        scores = sorted(
+            (float(np.dot(feature, item)), value)
+            for value, item in self.board_subject_templates.items()
+        )
+        scores.reverse()
+        top = scores[0]
+        second_score = scores[1][0] if len(scores) > 1 else -1.0
+        # 低置信度直接拒绝，避免 3/4 等相邻等级的猜测进入搜索。
+        if top[0] < 0.65 or top[0] - second_score < 0.10:
+            return -1
+        return top[1]
+
+    def _load_preview_cell_templates(self, directory):
+        """载入 preview-<等级>-*.png 单格模板；0 级样本用于估计背景。"""
+        if not directory:
+            return
+        paths = sorted(Path(directory).glob("preview-*.png"))
+        labeled = []
+        for path in paths:
+            parts = path.stem.split("-")
+            if len(parts) < 3 or not parts[1].isdigit():
+                continue
+            value = int(parts[1])
+            image = cv2.imread(str(path))
+            if image is not None and 0 <= value <= 7:
+                labeled.append((value, image))
+        backgrounds = [image for value, image in labeled if value == 0]
+        if not backgrounds:
+            return
+        medians = []
+        for image in backgrounds:
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).reshape(-1, 3)
+            medians.append(np.median(lab, axis=0))
+        self.preview_bg_lab = np.median(np.array(medians), axis=0).astype(np.float32)
+        for value, image in labeled:
+            if value == 0:
+                continue
+            feature, _area_ratio = self._preview_subject_feature(image)
+            if feature is not None:
+                self.preview_cell_templates.setdefault(value, []).append(feature)
+        # 等级不全时不能安全启用，否则缺失等级必然会被错分成已有等级。
+        if any(value not in self.preview_cell_templates for value in range(1, 8)):
+            self.preview_cell_templates = {}
+
+    def _preview_subject_feature(self, image):
+        """剥离米色动态背景，返回归一化主体特征和最大主体面积占比。"""
+        if image is None or image.size == 0 or self.preview_bg_lab is None:
+            return None, 0.0
+        blurred = cv2.GaussianBlur(image, (5, 5), 0)
+        lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB).astype(np.float32)
+        distance = np.linalg.norm(lab - self.preview_bg_lab, axis=2)
+        mask = (distance > 9.0).astype(np.uint8) * 255
+        mask[:2] = mask[-2:] = 0
+        mask[:, :2] = mask[:, -2:] = 0
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        if count <= 1:
+            return None, 0.0
+        pick = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        x, y, width, height, area = stats[pick]
+        area_ratio = float(area) / float(image.shape[0] * image.shape[1])
+        # 干净背景里的飞鸟/边缘装饰实测远小于 5%，预告主体至少约 8%。
+        if area_ratio < 0.05:
+            return None, area_ratio
+        subject_mask = (labels[y:y + height, x:x + width] == pick).astype(np.float32)
+        subject = lab[y:y + height, x:x + width] - self.preview_bg_lab
+        subject *= subject_mask[:, :, None]
+        subject = cv2.resize(subject, (72, 72)).ravel()
+        subject_mask = cv2.resize(subject_mask, (72, 72)).ravel() * 20.0
+        feature = np.concatenate((subject, subject_mask))
+        norm = float(np.linalg.norm(feature))
+        return (feature / norm if norm > 0 else None), area_ratio
+
+    def _classify_preview_cell(self, image):
+        feature, _area_ratio = self._preview_subject_feature(image)
+        if feature is None:
+            return 0
+        scores = sorted(
+            (max(float(np.dot(feature, item)) for item in items), value)
+            for value, items in self.preview_cell_templates.items()
+        )
+        scores.reverse()
+        top = scores[0]
+        second_score = scores[1][0] if len(scores) > 1 else -1.0
+        if top[0] < 0.5 or top[0] - second_score < 0.08:
+            return -1
+        return top[1]
+
+    def _preview_values_from_cells(self, image):
+        box = self.preview.get("box") if self.preview else None
+        if not box:
+            return None
+        x0, x1 = float(box["x0"]), float(box["x1"])
+        y0, y1 = int(box["y0"]), int(box["y1"])
+        cell_width = (x1 - x0) / 6.0
+        values = []
+        for col in range(6):
+            left = max(0, int(x0 + col * cell_width))
+            right = min(image.shape[1], int(x0 + (col + 1) * cell_width))
+            patch = image[max(0, y0):min(image.shape[0], y1), left:right]
+            values.append(self._classify_preview_cell(patch))
+        if sum(value == 0 for value in values) >= 4:
+            return None
+        # 预告是整行同时出现；出现时个别空判定属于未识别，而非真实的 0。
+        return [-1 if value == 0 else value for value in values]
 
     def classify(self, img, x, y, kind="b"):
         if self.tpl:
@@ -148,6 +314,8 @@ class Recognizer:
         if patch.shape[0] < 2 or patch.shape[1] < 2:
             return -1
         patch = cv2.resize(patch, (self.tw, self.th))
+        if kind == "b" and self.board_subject_templates:
+            return self._classify_board_subject(patch)
         a = patch.astype(np.float32)[:, :, ::-1].ravel()  # BGR->RGB 展平
         a = a - a.mean()
         best, bs = -1, 0.0
@@ -201,10 +369,17 @@ class Recognizer:
         thr=80：低于此为背景渲染噪声（<80），高于此为半透明兔子主体信号
         （80~150+），实测该值能把两者干净分开且不切碎兔子。
         """
-        x0, x1 = max(0, int(cx - half)), int(cx + half)
-        y0, y1 = max(0, int(cy - 70)), int(cy + 70)
-        diff = cv2.absdiff(img[y0:y1, x0:x1].astype(np.int32),
-                           background[y0:y1, x0:x1].astype(np.int32)).sum(2)
+        if background is None or img.shape != background.shape:
+            return None
+        x0, x1 = max(0, int(cx - half)), min(img.shape[1], int(cx + half))
+        y0, y1 = max(0, int(cy - 70)), min(img.shape[0], int(cy + 70))
+        current = img[y0:y1, x0:x1]
+        empty = background[y0:y1, x0:x1]
+        if current.size == 0 or current.shape != empty.shape:
+            return None
+        diff = cv2.absdiff(
+            current.astype(np.int32), empty.astype(np.int32),
+        ).sum(2)
         mask = (diff > thr).astype(np.uint8) * 255
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         n, lab, stats, _ = cv2.connectedComponentsWithStats(mask)
@@ -244,10 +419,20 @@ class Recognizer:
     def preview_values(self, img, background=None, presence_threshold=0.015):
         if not self.preview:
             return None
+        if self.preview_cell_templates:
+            return self._preview_values_from_cells(img)
+        if background is not None and img.shape != background.shape:
+            # 标定坐标和空背景都属于固定帧尺寸。尺寸变化时继续差分不仅会
+            # 触发 OpenCV 异常，识别结果本身也没有意义。
+            return None
         if background is not None:
             visible, _scores = self.preview_visible(img, background, presence_threshold)
             if visible is False:
                 return None
+        # 有预告专用整格模板时优先使用。旧实现即使 items_p 已存在，也会先
+        # 走棋盘兔子形状分支，导致新采的预告模板实际上从未生效。
+        if self.tpl and self.has_preview_templates:
+            return [self.classify(img, x, y, "p") for x, y in self.preview["centers"]]
         # 优先：兔子本体形状匹配（需要空背景参照）。比单点颜色抗光照/背景，
         # 解决 2/3 两个米棕色易混的问题。
         if background is not None and getattr(self, "_tpl_rabbit_norm", None):
@@ -257,7 +442,7 @@ class Recognizer:
                 out.append(self._classify_rabbit(rabbit) if rabbit is not None else -1)
             return out
         # 专用整格模板比单点颜色更抗复杂背景；没有模板才回退到颜色。
-        if self.tpl and self.has_preview_templates:
+        if self.tpl and self.tpl_items.get("p"):
             return [self.classify(img, x, y, "p") for x, y in self.preview["centers"]]
         if self.preview_colors:
             # RGB 最近邻（预告元素专用颜色，减淡效果已体现在颜色值里）
