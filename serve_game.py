@@ -23,6 +23,7 @@ CONTENT_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".ttf": "font/ttf",
+    ".mp3": "audio/mpeg",
     ".json": "application/json; charset=utf-8",
 }
 

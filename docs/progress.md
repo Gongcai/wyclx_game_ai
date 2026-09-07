@@ -1,5 +1,262 @@
 # 训练进度记录
 
+## N-Tuple + Beam 搜索线（2026-08-30 ~ 09-03，l2-ext 续训到 5M 产出更强 V，等算力翻盘显著击败 PUCT r2）
+
+新增 `agents/ntuple_search.py`（`FastNtupleValue` numpy 镜像查表 +
+`NtupleBeamPolicy` beam 搜索）、`Game.clone()`（快拷贝，~10us vs deepcopy
+~130us）、`eval_paired_ntuple.py`（n-tuple+搜索 vs PUCT 部署配置配对评测）。
+`train_ntuple.py` 新增 `--behavior beam`（beam 行为策略在线 TD，**已证伪**）。
+
+主评测口径（用户 2026-08-30 指定）：**单局合成 9 数量**（配对每局 n9 均值），
+单次决策容忍 ≤500ms；每千步仅参考。
+
+关键发现：
+
+1. **逐条目独立 chance 采样是深度搜索的毒药**：beam 每条目在揭示点独立采样
+   预告，"幸运预告线"跨条目复利，depth 8 反而差于 depth 4（2.83 vs 3.54）。
+   改为**每 ply 按隐藏等级共享一次采样**（同层所有条目在同一确定性未来下比较）
+   后深度曲线反转：d12w12rw24 达 8.08/局（tune-l V，24 固定种子 1000 步上限，
+   211ms）。宽度在 8-12 饱和（w16 无增益），d16w16/d12w16 均不超过 d12w12。
+2. **tune-l V + d12w12rw24 vs PUCT r2 部署配置（sims64-d16-reuse-halving8-q2，
+   300 步上限，seed 860000+）：64 配对 seed 总体打平**——批次 1 +1.31
+   [-0.72,+3.38]、批次 2 -1.34 [-3.50,+0.91]，合并 ≈0，W/T/L=26/6/32。
+   但每千步 48.9 vs 42.4 略优，且模型简单（5.6MB 查表 vs 714k 参数网络 +
+   PUCT 树）。
+3. `num_det`（多确定性化平均）无增益（det2 7.79 vs det1 7.92），已关闭。
+4. **beam 行为策略在线 TD 证伪**（l3-beam，+45k 步）：固定种子搜索强度
+   8.08 → 3.96 大幅退化。与 r2 线"在自身策略窄分布上重训丧失分布外区分度"
+   同一失败模式。已停，`runs/ntuple-l3-beam/` 仅作记录。
+5. **1-ply 续训有效；2.4M-3.0M 局部平台被续训彻底打破，1-ply 一路涨到 27.33**
+   （l2，tune-l 1.12M → 3.00M 已完成；l2-ext 从 3.00M → 5.00M 续训**已完成**）：
+   1-ply 指标 12.16 → 18.02/千步（2.32M）→ 20.68/千步（2.68M，原 `best.pt`）；
+   3.00M 时最后 10 次均值 17.17 一度看似平台。**l2-ext 续训打破平台并持续棘轮
+   上升：22.41（3.28M）→ 25.24（4.14M）→ 26.56（4.88M）→ 27.33（4.96M，新
+   `runs/ntuple-l2-ext/best.pt`）**，5.00M 最后 10 次均值 23.24，相比旧 best.pt
+   的 20.68 **提升 +32%**，5M 步内未见真平台。l3 的教训与之对照：给 V 喂数据要
+   宽分布（ε-greedy），不要窄分布（搜索策略）。**这个更强 V 是后续等算力翻盘的
+   关键（见第 11 条）。**
+6. **l2 V（frozen-198.pt，2.20M 步快照）+ d12w12rw24 在 32-seed 配对评测上
+   显著击败 PUCT r2 部署配置**（`runs/eval-paired-ntuple-l2d20-b1.json`，
+   seed 860000-860031，max_moves 300）：
+
+   ```text
+   ntw-l2d20: n=32 mean=11.75 P10/P50/P90=4/12/19 max=21 每千步=54.31
+   puct-r2:   n=32 mean= 6.84 P10/P50/P90=2/ 7/13 max=18 每千步=42.42
+   配对差 +4.91  bootstrap 95% CI [+2.97, +7.03]  W/T/L=26/1/5
+   ```
+
+   各分位全面领先，不是被少数高分局拉起来的。**这是 N-Tuple 线首次在严格配对
+   评测上显著超过当前部署模型**，且模型只有 5.6MB 查表（vs PUCT 714k 参数网络
+   + 树搜索）。与同一搜索配置下 tune-l V（1.12M 步）的 64-seed 合并打平结果
+   （≈0，W/T/L=26/6/32）对照，验证了"1-ply 续训有效"的判断：从 1.12M → 2.20M
+   步就把搜索强度从打平推到显著领先。
+7. **best.pt（2.68M 步，1-ply 20.68）+ d12w12rw24 在 32-seed 配对评测上
+   同样显著击败 PUCT r2，且差值大于 frozen-198**（`runs/eval-paired-ntuple-l2best-b1.json`，
+   seed 870000-870031 新批次，max_moves 300）：
+
+   ```text
+   ntw-l2best: n=32 mean=12.75 P10/P50/P90=7/14/19 max=20 每千步=55.25
+   puct-r2:    n=32 mean= 6.19 P10/P50/P90=2/ 5/13 max=20 每千步=40.77
+   配对差 +6.56  bootstrap 95% CI [+4.31, +8.72]  W/T/L=23/3/6
+   ```
+
+   对比 frozen-198 的 +4.91 [+2.97, +7.03]，best.pt 差值更大、CI 更紧、离零
+   更远。**1-ply 指标在 2.4M 后趋平，但 beam 搜索强度没平台**——best.pt
+   （2.68M）反而比 frozen-198（2.20M）更强，说明 1-ply 平台 ≠ beam 平台，
+   续训到 best.pt 是正确的。
+8. **延迟与吞吐换算**（按 0.4s 动画窗口）：ntw-l2best 每步 207ms
+   （P50 206ms，max 218ms，极稳定），puct-r2 部署配置每步 66ms。串行 30 分钟
+   估算 ntw-l2best ≈ **163.9** vs puct-r2 ≈ 157.5（本批 seed）——每步慢 3 倍但
+   每千步质量高 36%，串行反而略优。异步（决策藏进动画，207ms < 400ms 窗口
+   完全兼容）：ntw-l2best ≈ **248.6** vs puct-r2(sims64) ≈ 183.5。**但注意：
+   这是 ntuple@207ms vs PUCT@66ms 的算力不对等对比**，等算力下差距收敛到噪声
+   内（见第 9 条）。207ms 也远低于用户设定的 ≤500ms 容忍上限。
+9. **等算力对照：PUCT r2 提到 sims192（~226ms/步）后与 ntuple+beam 打平**
+   （`runs/eval-paired-ntuple-l2best-eqbud.json`，seed 895000-895031，
+   ntuple 侧仍为 best.pt + d12w12rw24 @211ms/步）：
+
+   ```text
+   ntw-l2best:    n=32 mean=10.84 每千步=51.47  ms/步=211 (P50 209, max 230)
+   puct-r2 s192:  n=32 mean= 9.88 每千步=49.44  ms/步=226 (P50 208, max 425)
+   配对差 +0.97  bootstrap 95% CI [-1.97, +3.84]  W/T/L=17/1/14
+   ```
+
+   **CI 跨零，等算力下统计打平。** 第 6-7 条的 +4.91/+6.56 决定性胜利，主要
+   驱动力是算力不对等（ntuple 207ms vs PUCT 部署 66ms = 3 倍算力差），而非
+   N-tuple 表示/beam 搜索在算法层面根本性超越 neural V + PUCT。修正认知：
+   - 等算力下两种架构强度相当，N-tuple 的真实优势是**架构简洁性**（5.6MB
+     查表、无 GPU、无神经网络、无树搜索）与**延迟稳定性**（max 230ms vs
+     PUCT max 425ms，PUCT 尖峰会超出 400ms 异步窗口，ntuple 不会）。
+   - 等算力异步 30 分钟估算：ntuple ≈ 51.47×4.5 = 231.6 vs PUCT(s192)
+     ≈ 49.44×4.5 = 222.5，差距在噪声内，不再"远超"。
+   - 部署选择应基于**基础设施约束**而非"算法更强"：CPU-only/简洁/延迟稳定
+     选 ntuple+beam；有 GPU 且需低延迟（<100ms）选 PUCT sims64。两者等算力
+     打平，无绝对优胜者。
+   - 注：sims192 的 PUCT 实际 226ms/步略高于 ntuple 211ms/步（多 7% 算力），
+     ntuple 在轻微算力劣势下仍打平/略领，结论稳健。
+10. **best.pt 搜索参数重扫（16 seeds，seed 880000+，全部不显著，d8w12 待确认）**
+    （`runs/sweep-bestpt-{A-rw24,B-rw16,C-rw32}.json`）。Sweep A（rw24 固定，
+    变 depth×width，6 配置共享 PUCT 基线）：
+
+    ```text
+    ntw-d8w12 : mean=13.94 每千步=56.19 ms/步=141  vs d12w12 +2.75 [-0.69,+6.31] W/T/L=9/3/4
+    ntw-d12w16: mean=12.94 每千步=55.24 ms/步=270  vs d12w12 +1.75 [-2.12,+5.31] W/T/L=9/4/3
+    ntw-d20w12: mean=12.38 每千步=54.26 ms/步=344  vs d12w12 +1.19 [-2.44,+4.69] W/T/L=8/1/7
+    ntw-d12w12: mean=11.19 每千步=52.40 ms/步=209  （现部署配置，基准）
+    ntw-d16w12: mean=10.56 每千步=51.78 ms/步=273  vs d12w12 -0.62 [-4.31,+3.00] W/T/L=8/1/7
+    ntw-d12w8 : mean= 9.69 每千步=50.75 ms/步=149  vs d12w12 -1.50 [-5.06,+1.81] W/T/L=9/0/7
+    puct-r2   : mean= 6.12 每千步=39.48 ms/步=100  （sims64 参照）
+    ```
+
+    Sweep B/C（d12w12，变 root_width）：rw16=11.50 / rw24=11.19 / rw32=10.81，
+    轻微下降趋势但全在噪声内，**rw24 非必需，rw16 即可**。
+
+    **16 seeds 下所有配对差 CI 均跨零，无一显著**——再次验证"小样本配对不可信"
+    （参照 sequential halving 8-seed +1.62 → 64-seed -0.02 的教训）。可疑信号：
+    - **d8w12 点估计最高（13.94）且相对最快（141ms）**。若 32-seed 确认，意味着
+      **更强的 V 需要更浅的搜索**（V 足够准时深搜反而放大 V 误差/过拟合确定性
+      chance 采样），与"完美 V 下 1-ply 最优"理论一致。这与 tune-l V（弱 V）时代
+      "d12w12rw24 最优、depth 8 差于 depth 4"的结论相反，说明最优搜索深度随 V
+      强度变化。
+    - 深度曲线非单调：d8 > d12 < d16 < d20，d20 回弹很可能是噪声。
+    - 宽度在 d12 下单调有效（w8 < w12 < w16），但 w16 vs w12 不显著且更慢。
+    - ms/步 因与续训+等算力评测并行有 CPU 争用而偏高，质量排名（n9 确定性）
+      不受影响，绝对延迟需 solo 重测。
+    - **d8w12 32-seed 确认已完成**（seed 885000+，`runs/sweep-bestpt-d8w12-confirm.json`）：
+      质量配对差 vs d12w12 收敛到 **+1.50 [-0.84, +3.88] W/T/L=17/2/13，CI 跨零
+      不显著**——16-seed 的 +2.75 领先未能在 32 seeds 复现，"浅搜质量更强"假设
+      **未被证实**。但 **d8w12 快 32%（136ms vs 201ms）且延迟更稳（max 149 vs
+      215ms）**，质量统计等价下效率显著占优。串行 30 分钟估算（本批 seed）
+      d8w12 ≈ 173.7 > PUCT sims64 ≈ 151.1 > d12w12 ≈ 146.3，**d8w12 是串行部署
+      最优配置**。
+    - **低预算等算力对照已完成，"ntuple 低延迟支配"假设被证伪**（seed 890000+，
+      `runs/eval-paired-ntuple-d8w12-eqbud-low.json`）：ntuple@d8w12(137ms,
+      50.38/千步) vs PUCT@sims128(131ms, 48.62/千步)，配对差 **+0.69
+      [-1.62, +2.94] W/T/L=14/8/10，CI 跨零打平**。预测错误根源：PUCT 质量在
+      sims64→128 之间即饱和（39→48.6 大跳，128→192 仅 +0.8），非线性爬升；
+      且插值混用了低批次 seed（885000 的 PUCT 恰为 39.04）低估基线。
+    - **统一结论：ntuple+beam 与 PUCT r2 等算力等价，两个预算点均打平**：
+      ~131-137ms 低点（d8w12 50.38 vs sims128 48.62，+0.69 不显著）；
+      ~211-226ms 高点（d12w12 51.47 vs sims192 49.44，+0.97 不显著）。两者都在
+      ~130-140ms/步 饱和到 ~48-50/千步。**延迟稳定性优势也消失**：PUCT@sims128
+      max 142ms vs ntuple@d8w12 max 145ms，几乎一样稳（"PUCT max 425ms 尖峰"
+      仅出现在 sims192，sims128 没有）。之前所有"ntuple 大胜"（+4.91/+6.56）
+      纯粹是 ntuple@137-211ms vs PUCT 部署@sims64/65ms 的 2-3 倍算力差造成。
+      **"N-tuple 算法更强"假设被两个独立预算点的等算力对照彻底证伪**；部署选择
+      纯粹基于基础设施约束（CPU-only/5.6MB 查表/无 GPU 选 ntuple；已有 GPU
+      神经管线选 PUCT）。
+    - **唯一剩余变数**：以上结论基于 best.pt（2.68M，1-ply 20.68）。l2-ext 更强
+      V（3.28M，1-ply 22.41）若能把 beam 强度推高，可能在等算力下打破平衡。
+      续训完成后需用新 best.pt 重扫搜索参数 + 重做等算力对照——N-tuple 线最后
+      的翻盘机会。注意 l2-ext 最优搜索配置可能再次偏移。
+11. **l2-ext 新 V（1-ply 27.33）翻盘：等算力下显著击败 PUCT r2，推翻第 9 条
+    "等算力等价"结论**（新 V = `runs/ntuple-l2-ext/best.pt`，4.96M 步快照）。
+    五组实验（B/B2/C/D/A）联合画面：
+
+    ```text
+    场景                  ntuple配置   PUCT配置   配对差              显著性
+    等算力低预算(300步)   d8w12        sims128    +5.81 [+4.11,+7.50]  64seed(B+B2)
+    等算力高预算(300步)   d12w12       sims192    +3.06 [+0.50,+5.53]  32seed(C)
+    长局(1000步)          d8w12        sims128    +13.25 [+6.56,+20.50] 16seed(D)
+    ```
+
+    - **B+B2（64 seed，决定性）**：新 V@d8w12 mean_n9=12.98 vs PUCT@sims128
+      7.17，每千步 55.29 vs 43.38，W/T/L=49/2/13。批次一致（batch1 +6.19、
+      batch2 +5.44）。**对比旧 V 同配置同预算的 +0.69（打平），唯一变量是 V
+      强度（20.68→27.33），配对差跳到 +5.81**——更强 V 把 1-ply 提升转化为
+      beam 等算力优势。
+    - **C（高预算 32 seed）**：新 V@d12w12 56.50/千步 vs PUCT@sims192 51.04/千步，
+      +3.06 显著。高预算下 PUCT 靠更多 sims 缩小差距（sims128→192 使 PUCT 每千步
+      43.38→51.04），但 ntuple 质量对深度不敏感（d8w12 55.29 ≈ d12w12 56.50），
+      仍胜出。
+    - **D（长局 16 seed）**：新 V@d8w12 mean_n9=20.62、存活 338 步 vs PUCT 7.38、
+      167 步，+13.25 碾压。**PUCT 树复用延迟在长局爆炸到 758ms/步（max 934ms，
+      超 500ms 容忍），ntuple beam 平坦 154ms**——长局是 PUCT 部署配置的硬伤。
+    - **A（配置扫描 16 seed）**：新 V 强到**质量对搜索深度 d6-d20 完全不敏感**
+      （所有配置 vs d8w12 配对 CI 跨零），但延迟差 3 倍（d6w12 115ms vs d20w12
+      388ms，争用下）。所有 ntuple 配置碾压 PUCT（+6.31~+8.75）。d12w16（更宽）
+      反而略差，宽度 >12 无益。
+    - **Solo 延迟重测**（8 seed，去争用）：ntuple@d6w12 **131ms**、d8w12 173ms、
+      PUCT@sims128 250ms（且随局长波动 131-758ms）。**修正第 9 条的等算力校准**：
+      ntuple@d6w12/d8w12 实际比 PUCT@sims128 更快更稳，新 V 是"更低算力 + 更稳
+      延迟 + 更强质量"三重优势，不只是等算力胜出。d6w12 与 d8w12 质量等价
+      （56.37 vs 57.10/千步）但快 24% → **d6w12 为部署最优配置**。
+    - **核心洞察**：N-tuple beam 质量由 **V 强度门控**，而非搜索深度。旧 V 不够强
+      时等算力打平、d8 饱和；新 V（27.33）够强后质量对深度不敏感，可用最快最浅的
+      d6w12 支配 PUCT。**第 9 条"两架构等算力等价"仅适用于旧 V，对新 V 已被
+      彻底推翻。** 续训 3M→5M（第 5 条）是本次最关键决策。
+    - caveat：B/C/D 的 ms/步 因 5 任务并行有争用膨胀（尤其 PUCT 多线程），质量
+      （n9 确定性）不受影响；solo 重测已校正延迟。D/A 为 16 seed 小样本但效应量
+      极大（D +13.25 CI 离零远、A 各配置 vs PUCT 全显著）。
+
+环境注意：本机 ZCode 桌面 AppImage 注入的环境变量会破坏 venv python
+（"Could not find platform dependent libraries"）。修复：
+`env -i HOME=$HOME LANG=zh_CN.UTF-8 PATH=/usr/bin:/bin .venv/bin/python ...`。
+
+恢复命令（l2 训练已完成至 3.00M 步，frozen-198 与 best.pt 的 32-seed 配对
+评测均已完成。以下为扩 seed 或复跑命令，同配置即自动跳过已完成局）：
+
+```bash
+# best.pt 配对评测（已完成 seed 870000-870031；扩到 64 seed 改 --episodes 64）
+.venv/bin/python -u eval_paired_ntuple.py \
+  --ntuple-models ntw-l2best=runs/ntuple-l2/best.pt \
+  --search-depth 12 --search-width 12 --search-root-width 24 \
+  --puct-model runs/puct-v3/real-h5-puct-r2-pv.pt \
+  --episodes 32 --seed 870000 --max-moves 300 \
+  --json-out runs/eval-paired-ntuple-l2best-b1.json
+```
+
+若在 ZCode 桌面 AppImage 环境内运行，仍需 `env -i HOME=$HOME LANG=zh_CN.UTF-8
+PATH=/usr/bin:/bin` 前缀规避环境变量污染。
+
+下一步（l2-ext 新 V 翻盘已确认：等算力低/高预算 + 长局三场景均显著胜出，
+d6w12 为最优配置）：
+① **部署切换**：把 `game_advisor.py` / `auto_play_h5.py` 的默认模型从 PUCT r2
+   换成 `runs/ntuple-l2-ext/best.pt` + d6w12rw24 beam（CPU-only、131ms、等算力
+   显著更强、长局延迟稳定）。PUCT r2 退役为备选。需改 advisor 的决策接口
+   （从 PUCT 树搜索换成 NtupleBeamPolicy）。
+② **完全空闲机器上 solo 重测延迟**：当前 solo 重测在负载 3.32 下做（d6w12
+   131ms、PUCT@sims128 250ms），需真正空闲机器确认绝对延迟，并测 d6w12 的
+   串行/异步 30 分钟吞吐（d6w12 56.37/千步 @131ms → 串行 ≈170、异步 ≈254）。
+③ **继续续训？** 1-ply 在 5M 仍未见真平台（27.33 是 4.96M 单点最高，最后 10
+   次均值 23.24 仍低于 best），可从 5M checkpoint 续训到 8-10M，看 V 能否更强、
+   等算力优势能否进一步扩大。风险：边际递减 + 1-ply 与 beam 强度关系可能非线性。
+④ **d6w12 的 64-seed 等算力确认**：当前 d6w12 仅 16-seed 扫描（A）+ 8-seed solo，
+   质量与 d8w12 等价但样本小。若部署 d6w12，应补 64-seed 等算力对照坐实。
+⑤ 失败备选（若部署遇阻）：更大 tuple 特征（格式 v3 重训）/ ntuple V 嵌入 PUCT
+   树（混合架构）。
+
+## N-Tuple Network + TD(lambda) 基线（2026-08-28）
+
+新增独立实验线 `agents/ntuple.py` / `train_ntuple.py`：使用共享 N-Tuple
+查表价值函数、afterstate 动作选择和稀疏 replacing TD(lambda) trace。特征包括
+列顶局部 tuple、无序列对 tuple、排序后的列高和 phase/global 信息；可见 preview
+与所属列绑定，且不读取 `_hidden_preview`。训练不使用 replay，支持 `real` 与配置中
+已有分布、断点续训和 `eval_ntuple.py` 评测。
+
+真实分布 50,000 步冒烟（`lambda=0.6, alpha=0.05`）中，N-Tuple 平均约 43 步死亡、
+得分 568，超过同批 greedy 的约 46 步 / 376 分；50 局均未合成 9。因此当前结论是：
+实现与 TD 更新正确，能学习中间合成，但仍未超过现有 Policy/Value + PUCT，暂作为
+CPU 基线，不替换 `real-h5-puct-r2`。
+
+继续调优：从 1M 步原始 checkpoint 分支训练。降低中间合成奖励（`merge-w=0.3`）
+导致 40,000 步增量评估回到 0 个 9；提高稀疏目标权重（`n9-w=30`，其余
+`lambda=0.6, alpha=0.05`）在约 1.02M 步达到 11.40/千步，200 局独立复测为
+0.83 个9/局、72.86 步、11.39/千步（`runs/ntuple-tune-f`）。相对原始模型约
+7.30/千步，当前最佳 N-Tuple 参数采用 `n9-w=30, death-w=15`；仍明显低于 PUCT，暂不替换部署模型。
+为避免目标函数和评测策略不一致，`eval_ntuple.py` 会优先读取模型保存的
+`gamma`/`merge-w`/`n9-w`/`death-w` 元数据，也可用命令行显式覆盖。
+
+进一步调优：在带 health 全局表的 `runs/ntuple-tune-j` 基础上提高死亡惩罚。
+`death-w=10` 的 200 局复测为 11.56/千步；`death-w=15` 的训练期 100 局为
+12.16/千步，独立 100 局为 **1.03 个9/局、75.58 步、13.63/千步**
+（`runs/ntuple-tune-l/best.pt`）。当前这是 N-Tuple 最佳候选，但仍约为 PUCT
+基准 44/千步的三成。
+
+继续扫描：`death-w=20` 在相同分支上回落到 8.94/千步，说明过高死亡惩罚会
+过度保守；`n9-w=40, death-w=15` 完整评估为 12.90/千步，也没有超过 L。
+因此暂时固定 `n9-w=30, death-w=15`。
+
 更新时间：2026-08-16（新增 AI 自动玩 H5 网页版；真实掉落分布线确立：
 real-h5-puct-r2 升为推荐模型；r3 及全部变体证伪。本文档从 08-12 版恢复，
 并补记 08-13 ~ 08-16。）
@@ -33,6 +290,20 @@ real-h5-puct-r2 升为推荐模型；r3 及全部变体证伪。本文档从 08-
   后续间隔 13.6 步，决策 66ms，串行 30 分钟估算 **205.8**（同种子 r1 为
   36.7/千步、142.4）；示范局单局最高 **36 个9**
 - 配对卫冕 5 组不败（sims64-d16-reuse-halving8-q2，配对表见下文）
+- **2026-09-03 更新：l2-ext 续训到 5M 产出更强 V（1-ply 27.33），等算力翻盘，
+  N-Tuple+beam 显著击败 PUCT r2，推翻此前"等算力等价"结论**——此前旧 V
+  （2.68M，1-ply 20.68）在等算力下与 PUCT 打平（低预算 +0.69、高预算 +0.97，
+  CI 跨零），曾判为"两架构等价、大胜纯靠算力不对等"。**但续训 3M→5M 把 1-ply
+  推到 27.33（+32%）后，新 V 在所有场景显著胜出**：等算力低预算（d8w12 vs
+  sims128）+5.81 [+4.11,+7.50]（64 seed）；等算力高预算（d12w12 vs sims192）
+  +3.06 [+0.50,+5.53]（32 seed）；长局（1000 步）+13.25 [+6.56,+20.50]（16 seed，
+  且 PUCT 树复用延迟爆炸到 758ms 超容忍，ntuple 平坦 154ms）。配置扫描显示新 V
+  强到质量对搜索深度 d6-d20 不敏感，**d6w12 为部署最优**（solo 131ms，质量等价
+  d8w12 但快 24%；PUCT@sims128 solo 250ms 且随局长波动）。核心洞察：**N-tuple
+  beam 质量由 V 强度门控而非搜索深度**，旧 V 不够强故等算力打平，新 V 够强即
+  支配。**新部署候选：`runs/ntuple-l2-ext/best.pt` + d6w12rw24 beam**（5.6MB
+  查表、CPU-only、延迟稳定、等算力显著优于 PUCT r2）。PUCT r2 退役为备选。
+  （详见上文 N-Tuple + Beam 搜索线第 5、11 条。）
 - 最强启发式仍是 beam depth4 默认权重（实机可用，real 分布单跑 46.7/千步）；
   foresee-d12（43.0/千步，high 分布）为预知诊断上限，真实游戏不可用（见存档）
 

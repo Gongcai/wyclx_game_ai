@@ -72,6 +72,39 @@ class Game:
             values.append(self._future_drop(self._drop_count + i - len(values), self.max_merged))
         return values
 
+    def clone(self):
+        """快速拷贝可观察状态，供搜索热路径替代 deepcopy。
+
+        只复制字段与栈列表（deepcopy 实测 ~130us，此实现 ~10us）。rng 复制
+        当前状态（与 deepcopy 语义一致，克隆内 _prepare_hidden_preview 的抽样
+        不影响原局）；drop_sampler 视为只读共享引用。
+        """
+        cloned = Game.__new__(Game)
+        cloned.cols = self.cols
+        cloned.h5_style = self.h5_style
+        cloned.drop_sampler = self.drop_sampler
+        cloned.future_seed = self.future_seed
+        cloned.stacks = [st[:] for st in self.stacks]
+        cloned.score = self.score
+        cloned.n9_count = self.n9_count
+        cloned.moves = self.moves
+        cloned.max_merged = self.max_merged
+        cloned.dead = self.dead
+        cloned.preview = None if self.preview is None else list(self.preview)
+        cloned._hidden_preview = (
+            None if self._hidden_preview is None else list(self._hidden_preview)
+        )
+        cloned._hidden_preview_level = self._hidden_preview_level
+        cloned.last_drop = None if self.last_drop is None else list(self.last_drop)
+        cloned.events = []
+        cloned._afterstate_pending = self._afterstate_pending
+        cloned._drop_count = self._drop_count
+        cloned.current_cycle_empty_peak = self.current_cycle_empty_peak
+        cloned.recent_cycle_empty_peaks = list(self.recent_cycle_empty_peaks)
+        cloned.rng = random.Random()
+        cloned.rng.setstate(self.rng.getstate())
+        return cloned
+
     def observe(self):
         return [list(st) for st in self.stacks]
 

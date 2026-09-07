@@ -44,6 +44,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # 5. 多模型配对对比（同种子同局面，支持增量追加到 --json-out）
 .venv/bin/python eval_paired_puct.py --models LABEL=ckpt.pt LABEL2=ckpt2.pt --json-out runs/paired.json
+
+# N-Tuple Network + afterstate TD(lambda) 基线
+.venv/bin/python train_ntuple.py --dist real --steps 1000000 --n9-w 30 --death-w 15 --run-id ntuple-real
+.venv/bin/python eval_ntuple.py --model runs/ntuple-real/best.pt --dist real --n 1000
 ```
 
 其他：`train_bc.py`（行为克隆，仅诊断用）、`train_dagger.py`（DAgger 修复闭环分布偏移）、`train_afterstate_q.py`（afterstate Q 头微调，需 `--init-model`）、`analyze_human_strategy.py`。
@@ -58,6 +62,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `agents/search.py` — 基于真实 `Game` 深拷贝的 beam search（示范教师）；未知掉落用可观察盘面构造确定性模拟种子，禁止读真实 RNG 隐藏状态。
 - `agents/policy_value.py` — 等变列编码网络，联合预测：动作分布（policy）、未来窗口折扣 9 数（value）、距下一个 9 的步数、短期死亡风险。是 PUCT 的先验与叶评估。
 - `agents/puct.py` — PUCT 搜索。默认在每条模拟里独立采样未知掉落（root-sampling）；`chance_samples > 0` 时切换为显式 afterstate chance node（Stochastic MuZero 式，配 progressive widening）；另支持 Gumbel 根 sequential halving。`--puct-death-penalty` 从叶价值扣除死亡风险，代表丢失成熟盘面重经历冷启动的机会成本。
+- `agents/ntuple.py` — 共享 N-Tuple 查表价值函数、afterstate 动作选择与稀疏 replacing TD(lambda) trace；不读取隐藏预告，作为独立 CPU 基线。
 - `agents/mcts.py`、`agents/baselines.py`、`agents/human_strategy.py` — 随机 MCTS、random/greedy 基线、人类策略规则。
 - 评测哲学：`eval_competition.py` 分开统计每局首个 9 的步数成本与同局后续 9 的间隔，用于判断"继续经营成熟盘面 vs 主动死亡重开"的盈亏平衡；`eval_paired_puct.py` 做同种子配对比较以降低方差。
 

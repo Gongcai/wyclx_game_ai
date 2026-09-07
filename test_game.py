@@ -6,6 +6,7 @@ from agents.dqn import HISTORY_DIM, META_DIM, encode
 from agents.policy_value import PolicyValueNet
 from agents.puct import puct_search
 from agents.human_strategy import human_structure
+from agents.ntuple import EligibilityTrace, NtupleNetwork
 from game import Game
 
 
@@ -348,6 +349,72 @@ def t_human_structure_prefers_ordered_stacks():
     assert ordered_metrics.score > disordered_metrics.score
 
 
+def t_ntuple_features_are_column_permutation_invariant():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    g.stacks = [[1, 2], [], [3, 3, 1], [4], [2, 1, 1], []]
+    g.moves = 2
+    g.preview = [1, 0, 2, 1, 3, 0]
+    network = NtupleNetwork()
+    original = network.feature_counts(g)
+    permutation = [2, 5, 0, 4, 1, 3]
+    permuted = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    permuted.stacks = [g.stacks[col] for col in permutation]
+    permuted.moves = g.moves
+    permuted.preview = [g.preview[col] for col in permutation]
+    assert original == network.feature_counts(permuted)
+
+
+def t_ntuple_does_not_read_hidden_preview():
+    g = Game(rng=random.Random(0), drop_sampler=lambda rng, m=None: 1)
+    network = NtupleNetwork()
+    g._hidden_preview = [7, 7, 7, 7, 7, 7]
+    first = network.feature_counts(g)
+    g._hidden_preview = [2, 2, 2, 2, 2, 2]
+    assert first == network.feature_counts(g)
+
+
+def t_ntuple_td_terminal_update_changes_active_tables():
+    g = Game(rng=random.Random(0))
+    network = NtupleNetwork()
+    counts = network.feature_counts(g)
+    trace = EligibilityTrace()
+    before = network.value(counts=counts)
+    delta = trace.update(
+        network, counts, reward=3.0, next_value=100.0,
+        gamma=0.99, trace_lambda=0.6, alpha=0.05, terminal=True,
+    )
+    assert delta == 3.0 - before
+    assert network.value(counts=counts) > before
+    assert not trace.values
+
+
+def t_clone_matches_deepcopy_trajectories():
+    """clone() 必须与 deepcopy 玩出完全相同的轨迹与可观察状态。"""
+    import copy
+
+    for seed in range(8):
+        base = Game(rng=random.Random(seed))
+        a = copy.deepcopy(base)
+        b = base.clone()
+        assert b.rng.getstate() == a.rng.getstate()
+        for _step in range(120):
+            assert a.dead == b.dead
+            assert a.stacks == b.stacks
+            assert a.moves == b.moves
+            assert a.preview == b.preview
+            assert a.score == b.score
+            assert a.n9_count == b.n9_count
+            assert a.max_merged == b.max_merged
+            assert a._afterstate_pending == b._afterstate_pending
+            assert a._drop_count == b._drop_count
+            if a.dead:
+                break
+            action = random.Random(seed * 100 + _step).choice(
+                [(s, d) for s in range(6) for d in range(6) if s != d]
+            )
+            assert a.move(*action) == b.move(*action)
+
+
 def run_all():
     t_basic_merge()
     t_merge_run_of_4()
@@ -376,6 +443,10 @@ def run_all():
     t_puct_safe_veto_excludes_guaranteed_death()
     t_cycle_search_returns_legal_and_covers_phases()
     t_human_structure_prefers_ordered_stacks()
+    t_ntuple_features_are_column_permutation_invariant()
+    t_ntuple_does_not_read_hidden_preview()
+    t_ntuple_td_terminal_update_changes_active_tables()
+    t_clone_matches_deepcopy_trajectories()
     print("all tests passed")
 
 
